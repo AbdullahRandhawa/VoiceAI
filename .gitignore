@@ -1,0 +1,24 @@
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# ── Secrets ─────────────────────────────────────────────────
+backend/.env
+backend/firebase-adminsdk.json
+backend/ai-voiceassistant-firebase.json
+frontend/.env
+frontend/.env.local
+
+# ── Node ────────────────────────────────────────────────────
+node_modules/
+dist/
+frontend/dist/
+
+# ── IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
