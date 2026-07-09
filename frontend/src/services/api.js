@@ -34,7 +34,8 @@ export const streamChat = async (
   message,
   onToken,
   onDone,
-  onError
+  onError,
+  skipUserSave = false
 ) => {
   let token = '';
   try {
@@ -52,7 +53,11 @@ export const streamChat = async (
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ conversation_id: conversationId, message }),
+      body: JSON.stringify({ 
+        conversation_id: conversationId, 
+        message, 
+        skip_user_save: skipUserSave 
+      }),
     });
   } catch {
     onError('Network error — is the backend running?');
@@ -86,7 +91,7 @@ export const streamChat = async (
       try {
         const data = JSON.parse(line.slice(6));
         if (data.token) onToken(data.token);
-        if (data.done) onDone(data.message_id ?? '');
+        if (data.done) onDone(data.message_id ?? '', data.audio_url ?? '');
       } catch {
         // Malformed SSE line — skip
       }
@@ -97,12 +102,22 @@ export const streamChat = async (
 // ── Audio ─────────────────────────────────────────────────────────────────────
 export const transcribeAudio = (audioBlob, conversationId) => {
   const form = new FormData();
-  form.append('audio', audioBlob, 'audio.webm');
+  let ext = 'webm';
+  if (audioBlob.type.includes('mp4')) ext = 'm4a';
+  else if (audioBlob.type.includes('ogg')) ext = 'ogg';
+  else if (audioBlob.type.includes('wav')) ext = 'wav';
+  else if (audioBlob.type.includes('mpeg')) ext = 'mp3';
+  
+  form.append('audio', audioBlob, `audio.${ext}`);
   form.append('conversation_id', conversationId);
   return api.post('/audio/transcribe', form);
 };
 
 export const generateTTS = (text) =>
   api.post('/audio/tts', { text });
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const syncUser = (userData) =>
+  api.post('/auth/sync', userData);
 
 export default api;

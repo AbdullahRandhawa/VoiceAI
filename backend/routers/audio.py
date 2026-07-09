@@ -19,10 +19,8 @@ async def transcribe_voice_message(
     user: dict = Depends(get_current_user),
 ):
     """
-    Accepts a voice message upload (WebM/WAV/MP3), runs STT, uploads audio
-    to Cloudinary, and saves the message to Firestore.
-
-    Returns: { transcript, audio_url, message_id }
+    Receives an audio blob, transcribes it via OpenRouter (STT),
+    uploads audio to Cloudinary, and saves the message to Firestore.
     """
     audio_bytes = await audio.read()
     filename = audio.filename or "audio.webm"
@@ -31,10 +29,9 @@ async def transcribe_voice_message(
     import asyncio
     transcript, upload = await asyncio.gather(
         openrouter.transcribe_audio(audio_bytes, filename),
-        cloudinary_service.upload_audio(audio_bytes),
+        cloudinary_service.upload_audio(audio_bytes, filename=filename),
     )
 
-    # Save voice message to Firestore (content = transcript for LLM context)
     saved = await firestore_service.save_message(
         conversation_id,
         role="user",
@@ -42,7 +39,6 @@ async def transcribe_voice_message(
         audio_url=upload["url"],
         transcript=transcript,
     )
-
     return {
         "transcript": transcript,
         "audio_url": upload["url"],
@@ -63,5 +59,5 @@ async def generate_tts(body: TTSRequest, user: dict = Depends(get_current_user))
     Used by the frontend to generate playback audio for assistant messages.
     """
     audio_bytes = await openrouter.text_to_speech(body.text)
-    upload = await cloudinary_service.upload_audio(audio_bytes)
+    upload = await cloudinary_service.upload_audio(audio_bytes, filename="audio.mp3")
     return {"audio_url": upload["url"]}

@@ -1,12 +1,20 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, Loader2, Copy, RotateCcw, MessageSquare } from 'lucide-react';
 import AudioPlaybackPill from './AudioPlaybackPill';
 
 export default function MessageBubble({ message }) {
   const isUser = message.role === 'user';
   const isVoiceMsg = !!message.audio_url && isUser;
+  const isUploading = !!message._uploading;
   const [showTranscript, setShowTranscript] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <motion.div
@@ -19,22 +27,22 @@ export default function MessageBubble({ message }) {
         marginBottom: 6,
       }}
     >
-      {/* Assistant avatar */}
-      {!isUser && (
-        <div style={styles.avatar}>
-          <span style={{ fontSize: 14 }}>✦</span>
-        </div>
-      )}
-
       <div
         style={{
           ...styles.bubble,
           ...(isUser ? styles.bubbleUser : styles.bubbleAssistant),
-          maxWidth: isVoiceMsg ? 260 : '72%',
+          maxWidth: (isVoiceMsg || isUploading) ? 260 : '72%',
+          opacity: isUploading ? 0.7 : 1,
         }}
       >
-        {/* ── Voice Message ── */}
-        {isVoiceMsg ? (
+        {/* ── Uploading placeholder ── */}
+        {isUploading ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
+            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+            <span style={{ fontSize: '0.85rem', opacity: 0.8 }}>Uploading voice note…</span>
+          </div>
+        ) : isVoiceMsg ? (
+          /* ── Voice Message ── */
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <AnimatePresence mode="wait">
               {!showTranscript ? (
@@ -47,7 +55,7 @@ export default function MessageBubble({ message }) {
                   <div style={styles.voiceHeader}>
                     <span style={styles.voiceLabel}>🎤 Voice Message</span>
                   </div>
-                  <AudioPlaybackPill url={message.audio_url} />
+                  <AudioPlaybackPill url={message.audio_url} variant="oscillator" />
                 </motion.div>
               ) : (
                 <motion.p
@@ -57,33 +65,37 @@ export default function MessageBubble({ message }) {
                   exit={{ opacity: 0 }}
                   style={styles.transcriptText}
                 >
-                  {message.transcript || message.content}
+                  {message.transcript || message.content || "Empty transcript."}
                 </motion.p>
               )}
             </AnimatePresence>
 
-            {message.transcript && (
-              <button
-                style={styles.toggleBtn}
-                onClick={() => setShowTranscript((s) => !s)}
-              >
-                {showTranscript ? (
-                  <><ChevronUp size={12} /> Show Voice Note</>
-                ) : (
-                  <><ChevronDown size={12} /> Show Text</>
-                )}
-              </button>
-            )}
+            <button
+              style={styles.toggleBtn}
+              onClick={() => setShowTranscript((s) => !s)}
+            >
+              {showTranscript ? (
+                <><ChevronUp size={12} /> Hide Text</>
+              ) : (
+                <><MessageSquare size={12} /> Show Text</>
+              )}
+            </button>
           </div>
         ) : (
           /* ── Text Message ── */
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
             <p style={styles.textContent}>{message.content}</p>
 
-            {/* TTS playback for assistant */}
-            {!isUser && message.audio_url && (
-              <div style={{ marginTop: 10 }}>
-                <AudioPlaybackPill url={message.audio_url} />
+            {/* Assistant Action Pills */}
+            {!isUser && (
+              <div style={styles.assistantActionsRow}>
+                {message.audio_url && (
+                  <AudioPlaybackPill url={message.audio_url} autoPlay={message.autoPlay} />
+                )}
+                <button style={styles.actionPill} onClick={handleCopy}>
+                  <Copy size={13} />
+                  <span>{copied ? 'Copied' : 'Copy'}</span>
+                </button>
               </div>
             )}
           </div>
@@ -94,19 +106,6 @@ export default function MessageBubble({ message }) {
 }
 
 const styles = {
-  avatar: {
-    width: 30,
-    height: 30,
-    borderRadius: '50%',
-    background: 'var(--gradient-brand)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-    marginRight: 10,
-    marginTop: 4,
-    boxShadow: '0 2px 8px var(--accent-glow)',
-  },
   bubble: {
     padding: '12px 16px',
     borderRadius: 18,
@@ -147,16 +146,41 @@ const styles = {
   toggleBtn: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'center',
+    gap: 6,
     fontSize: '0.75rem',
-    color: 'rgba(255,255,255,0.7)',
-    background: 'rgba(255,255,255,0.12)',
-    border: 'none',
+    fontWeight: 500,
+    color: '#fff',
+    background: 'rgba(255,255,255,0.15)',
+    border: '1px solid rgba(255,255,255,0.2)',
     borderRadius: 999,
-    padding: '4px 10px',
+    padding: '6px 14px',
     cursor: 'pointer',
     fontFamily: 'Inter, sans-serif',
-    transition: 'background 0.15s',
+    transition: 'all 0.15s',
     width: 'fit-content',
+    marginTop: 4,
+  },
+  assistantActionsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 12,
+    flexWrap: 'wrap',
+  },
+  actionPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 14px',
+    borderRadius: 999,
+    background: 'rgba(255,255,255,0.06)',
+    border: '1px solid rgba(255,255,255,0.1)',
+    color: 'var(--text-secondary)',
+    fontSize: '0.8rem',
+    fontWeight: 500,
+    fontFamily: 'Inter, sans-serif',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
   },
 };

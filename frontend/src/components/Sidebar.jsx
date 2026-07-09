@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquarePlus,
@@ -6,6 +6,7 @@ import {
   LogOut,
   Phone,
   MessageSquare,
+  Loader2,
 } from 'lucide-react';
 import { logout } from '../services/auth';
 import { useNavigate } from 'react-router-dom';
@@ -13,16 +14,28 @@ import { useNavigate } from 'react-router-dom';
 export default function Sidebar({
   conversations,
   activeId,
+  loading,
   onSelect,
   onNew,
   onDelete,
   user,
 }) {
   const navigate = useNavigate();
+  const [deletingId, setDeletingId] = useState(null);
 
   const handleLogout = async () => {
     await logout();
     navigate('/login');
+  };
+
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    setDeletingId(id);
+    try {
+      await onDelete(id);
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -39,22 +52,22 @@ export default function Sidebar({
         </button>
       </div>
 
-      {/* Voice Call shortcut */}
-      <button
-        style={styles.voiceCallBtn}
-        onClick={() => navigate('/voice-call')}
-      >
-        <Phone size={16} />
-        <span>Real-Time Voice Call</span>
-        <span style={styles.liveTag}>LIVE</span>
-      </button>
-
       {/* Conversations list */}
       <div style={styles.listWrap}>
         <p style={styles.sectionLabel}>Conversations</p>
         <div style={styles.list}>
           <AnimatePresence>
-            {conversations.length === 0 && (
+            {loading ? (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                style={styles.loadingWrap}
+              >
+                <Loader2 size={24} style={{ animation: 'spin 1s linear infinite' }} />
+                <span>Loading chats...</span>
+              </motion.div>
+            ) : conversations.length === 0 ? (
               <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -63,13 +76,14 @@ export default function Sidebar({
                 No conversations yet.
                 <br />Start chatting!
               </motion.p>
-            )}
-            {conversations.map((conv) => (
-              <motion.div
-                key={conv.id}
-                initial={{ opacity: 0, x: -8 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -8 }}
+            ) : (
+              conversations.map((conv) => (
+                <motion.div
+                  key={conv.id}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -8 }}
+                className="conv-item"
                 style={{
                   ...styles.convItem,
                   ...(activeId === conv.id ? styles.convItemActive : {}),
@@ -77,19 +91,26 @@ export default function Sidebar({
                 onClick={() => onSelect(conv.id)}
               >
                 <MessageSquare size={14} style={{ flexShrink: 0, opacity: 0.6 }} />
-                <span style={styles.convTitle}>{conv.title}</span>
+                <span style={styles.convTitle}>{conv.title || 'New Chat'}</span>
                 <button
+                  className="conv-delete-btn"
                   style={styles.deleteBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(conv.id);
-                  }}
-                  title="Delete"
+                  onClick={(e) => handleDelete(e, conv.id)}
+                  title="Delete conversation"
+                  disabled={deletingId === conv.id}
                 >
-                  <Trash2 size={13} />
+                  {deletingId === conv.id ? (
+                    <Loader2
+                      size={13}
+                      style={{ animation: 'spin 1s linear infinite' }}
+                    />
+                  ) : (
+                    <Trash2 size={13} />
+                  )}
                 </button>
               </motion.div>
-            ))}
+              ))
+            )}
           </AnimatePresence>
         </div>
       </div>
@@ -182,7 +203,8 @@ const styles = {
     fontWeight: 700,
     padding: '2px 7px',
     borderRadius: 999,
-    background: 'rgba(139,92,246,0.3)',
+    background: 'rgba(37,211,102,0.3)',
+    color: '#25d366',
     letterSpacing: '0.08em',
   },
   listWrap: {
@@ -215,6 +237,16 @@ const styles = {
     padding: '24px 16px',
     lineHeight: 1.7,
   },
+  loadingWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '32px 16px',
+    color: 'var(--text-muted)',
+    fontSize: '0.85rem',
+    gap: 12,
+  },
   convItem: {
     display: 'flex',
     alignItems: 'center',
@@ -226,6 +258,7 @@ const styles = {
     color: 'var(--text-secondary)',
     fontSize: '0.855rem',
     minWidth: 0,
+    position: 'relative',
   },
   convItemActive: {
     background: 'var(--bg-glass-strong)',
@@ -249,7 +282,7 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     opacity: 0,
-    transition: 'opacity 0.15s',
+    transition: 'opacity 0.15s, color 0.15s',
   },
   footer: {
     padding: '14px 16px',

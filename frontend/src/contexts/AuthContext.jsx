@@ -5,6 +5,7 @@ import {
   useState,
 } from 'react';
 import { onAuthChange } from '../services/auth';
+import { upsertUserDocument } from '../services/firestore';
 
 const AuthContext = createContext({
   user: null,
@@ -19,6 +20,9 @@ export const AuthProvider = ({ children }) => {
     const unsub = onAuthChange((u) => {
       setUser(u);
       setLoading(false);
+      if (u) {
+        upsertUserDocument(u);
+      }
     });
     return unsub;
   }, []);

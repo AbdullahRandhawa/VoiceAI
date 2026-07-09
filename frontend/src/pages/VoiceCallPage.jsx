@@ -17,11 +17,11 @@ export default function VoiceCallPage() {
   const recorderRef = useRef(null);
 
   // ── Connect to backend WebSocket ──────────────────────────────────────────
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (convId = null) => {
     if (serviceRef.current?.isConnected) return;
     serviceRef.current = new VoiceCallService();
     try {
-      await serviceRef.current.connect({
+      await serviceRef.current.connect(convId, {
         onTranscript: (text) => {
           setTranscript(text);
           setStatus('processing');
@@ -45,9 +45,35 @@ export default function VoiceCallPage() {
     }
   }, []);
 
+  // Eagerly connect when the component mounts
+  React.useEffect(() => {
+    connect();
+    return () => {
+      if (serviceRef.current) {
+        serviceRef.current.disconnect();
+      }
+    };
+  }, [connect]);
+
   // ── Start recording ───────────────────────────────────────────────────────
   const startRecording = async () => {
-    await connect();
+    let convId = null;
+    try {
+      // Import createConversation dynamically or directly to avoid circular deps if needed
+      // but it's easier to just fetch it directly.
+      const api = await import('../services/api');
+      const res = await api.createConversation('Voice Call Session');
+      convId = res.data.id;
+    } catch {
+      console.warn("Could not create conversation for voice call, continuing without persistence.");
+    }
+    
+    // We disconnect and reconnect to pass the new conversationId
+    if (serviceRef.current?.isConnected) {
+      serviceRef.current.disconnect();
+    }
+    await connect(convId);
+    
     try {
       recorderRef.current = new VoiceRecorder();
       await recorderRef.current.start();

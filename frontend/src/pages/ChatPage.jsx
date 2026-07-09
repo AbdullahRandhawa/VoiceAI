@@ -5,25 +5,25 @@ import React, {
   useState,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Sparkles, MessageSquarePlus } from 'lucide-react';
+import { Send, Sparkles, MessageSquarePlus, Phone, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
   createConversation,
   deleteConversation,
-  generateTTS,
   getConversations,
   getMessages,
   streamChat,
   transcribeAudio,
 } from '../services/api';
+import { useNavigate } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import MessageBubble from '../components/MessageBubble';
 import StreamingMessage from '../components/StreamingMessage';
 import VoiceRecorderBtn from '../components/VoiceRecorder';
-import AutoReadToggle from '../components/AutoReadToggle';
 
 export default function ChatPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [conversations, setConversations] = useState([]);
@@ -32,23 +32,29 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamText, setStreamText] = useState('');
+  const [streamPhase, setStreamPhase] = useState('idle'); // 'idle' | 'thinking' | 'streaming' | 'audio'
   const [autoRead, setAutoRead] = useState(false);
-  const [isTTSLoading, setIsTTSLoading] = useState(false);
+  const [loadingConversations, setLoadingConversations] = useState(true);
 
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
-  // ── Load conversations on mount ───────────────────────────────────────────
+  // ── Load conversations when user is authenticated ────────────────────────
   useEffect(() => {
-    loadConversations();
-  }, []);
+    if (user) {
+      loadConversations();
+    }
+  }, [user]);
 
   const loadConversations = async () => {
     try {
+      setLoadingConversations(true);
       const res = await getConversations();
-      setConversations(res.data.conversations);
+      setConversations(res.data.conversations || []);
     } catch {
       // Silently fail — user will see empty list
+    } finally {
+      setLoadingConversations(false);
     }
   };
 
@@ -56,9 +62,10 @@ export default function ChatPage() {
   const selectConversation = useCallback(async (id) => {
     setActiveId(id);
     setStreamText('');
+    setStreamPhase('idle');
     try {
       const res = await getMessages(id);
-      setMessages(res.data.messages);
+      setMessages(res.data.messages || []);
     } catch {
       setMessages([]);
     }
@@ -66,6 +73,7 @@ export default function ChatPage() {
 
   // ── New conversation ──────────────────────────────────────────────────────
   const handleNew = async () => {
+    if (activeId && messages.length === 0) return; // Prevent unlimited empty chats
     try {
       const res = await createConversation();
       const conv = res.data;
@@ -77,7 +85,7 @@ export default function ChatPage() {
     }
   };
 
-  // ── Delete conversation ───────────────────────────────────────────────────
+  // ── Delete conversation (also deletes Cloudinary assets via backend) ──────
   const handleDelete = async (id) => {
     await deleteConversation(id);
     setConversations((prev) => prev.filter((c) => c.id !== id));
@@ -92,16 +100,17 @@ export default function ChatPage() {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, streamText]);
+  }, [messages, streamText, streamPhase]);
 
   // ── Send text message ─────────────────────────────────────────────────────
   const handleSend = async () => {
     const text = input.trim();
     if (!text || !activeId || streaming) return;
 
-    setInput('');
+    setInput('');;
     setStreaming(true);
     setStreamText('');
+    setStreamPhase('thinking');
 
     // Optimistically add user message to UI
     const tempUserMsg = {
@@ -120,42 +129,31 @@ export default function ChatPage() {
       (token) => {
         finalText += token;
         setStreamText(finalText);
+        setStreamPhase('streaming');
       },
-      async (msgId) => {
-        setStreaming(false);
-        setStreamText('');
-
+      async (msgId, audioUrl) => {
+        // Commit message with audio_url fully populated
         const assistantMsg = {
           id: msgId,
           role: 'assistant',
           content: finalText,
+          audio_url: audioUrl || null,
+          autoPlay: autoRead && !!audioUrl,
           created_at: new Date().toISOString(),
         };
+        setMessages((prev) => [...prev, assistantMsg]);
 
-        // If auto-read, generate TTS and attach URL
-        if (autoRead) {
-          setIsTTSLoading(true);
-          try {
-            const ttsRes = await generateTTS(finalText);
-            assistantMsg.audio_url = ttsRes.data.audio_url;
-            setMessages((prev) => [...prev, assistantMsg]);
-            // Auto-play
-            new Audio(ttsRes.data.audio_url).play();
-          } catch {
-            setMessages((prev) => [...prev, assistantMsg]);
-          } finally {
-            setIsTTSLoading(false);
-          }
-        } else {
-          setMessages((prev) => [...prev, assistantMsg]);
-        }
+        // Clear streaming state
+        setStreaming(false);
+        setStreamText('');
+        setStreamPhase('idle');
 
-        // Refresh conversation list (title may have been updated)
         loadConversations();
       },
       (err) => {
         setStreaming(false);
         setStreamText('');
+        setStreamPhase('idle');
         console.error('Stream error:', err);
       }
     );
@@ -163,10 +161,14 @@ export default function ChatPage() {
 
   // ── Voice message ─────────────────────────────────────────────────────────
   const handleVoiceRecording = async (blob) => {
+    if (!user) {
+      alert('Please sign in to send voice messages');
+      return;
+    }
+
     if (!activeId) {
-      // Auto-create conversation for voice messages too
       try {
-        const res = await createConversation('Voice Chat');
+        const res = await createConversation('New Chat');
         const conv = res.data;
         setConversations((prev) => [conv, ...prev]);
         setActiveId(conv.id);
@@ -174,17 +176,33 @@ export default function ChatPage() {
       } catch {
         alert('Failed to create conversation.');
       }
-      return;
+    } else {
+      await handleVoiceWithConvId(blob, activeId);
     }
-    await handleVoiceWithConvId(blob, activeId);
   };
 
   const handleVoiceWithConvId = async (blob, convId) => {
     try {
       setStreaming(true);
+      setStreamPhase('thinking');
+
+      // Optimistically show placeholder voice message while uploading
+      const tempId = `voice-temp-${Date.now()}`;
+      const placeholderMsg = {
+        id: tempId,
+        role: 'user',
+        content: '…',
+        audio_url: null,
+        transcript: null,
+        _uploading: true,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, placeholderMsg]);
+
       const res = await transcribeAudio(blob, convId);
       const { transcript, audio_url, message_id } = res.data;
 
+      // Replace placeholder with real message
       const userMsg = {
         id: message_id,
         role: 'user',
@@ -193,51 +211,47 @@ export default function ChatPage() {
         transcript,
         created_at: new Date().toISOString(),
       };
-      setMessages((prev) => [...prev, userMsg]);
+      setMessages((prev) => prev.map((m) => m.id === tempId ? userMsg : m));
 
-      // Now stream LLM response for the transcript
+      // Stream LLM response for the transcript
       let finalText = '';
       setStreamText('');
+      setStreamPhase('thinking');
+
       await streamChat(
         convId,
         transcript,
         (token) => {
           finalText += token;
           setStreamText(finalText);
+          setStreamPhase('streaming');
         },
-        async (msgId) => {
-          setStreaming(false);
-          setStreamText('');
-
+        async (msgId, audioUrl) => {
           const assistantMsg = {
             id: msgId,
             role: 'assistant',
             content: finalText,
+            audio_url: audioUrl || null,
+            autoPlay: !!audioUrl, // Always auto-play voice message responses
             created_at: new Date().toISOString(),
           };
-
-          // Always generate TTS for voice message responses
-          setIsTTSLoading(true);
-          try {
-            const ttsRes = await generateTTS(finalText);
-            assistantMsg.audio_url = ttsRes.data.audio_url;
-            setMessages((prev) => [...prev, assistantMsg]);
-            new Audio(ttsRes.data.audio_url).play();
-          } catch {
-            setMessages((prev) => [...prev, assistantMsg]);
-          } finally {
-            setIsTTSLoading(false);
-          }
+          setMessages((prev) => [...prev, assistantMsg]);
+          setStreaming(false);
+          setStreamText('');
+          setStreamPhase('idle');
           loadConversations();
         },
         (err) => {
           setStreaming(false);
           setStreamText('');
+          setStreamPhase('idle');
           console.error(err);
-        }
+        },
+        true // skipUserSave
       );
     } catch (err) {
       setStreaming(false);
+      setStreamPhase('idle');
       console.error('Voice message error:', err);
     }
   };
@@ -258,12 +272,20 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   };
 
+  // ── Status pill text ──────────────────────────────────────────────────────
+  const statusPill = streamPhase === 'thinking'
+    ? { text: 'Thinking…', icon: <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> }
+    : streamPhase === 'streaming'
+    ? { text: 'Generating audio…', icon: <span style={{ fontSize: 12 }}>🎵</span> }
+    : null;
+
   return (
     <div style={styles.root}>
       {/* Sidebar */}
       <Sidebar
         conversations={conversations}
         activeId={activeId}
+        loading={loadingConversations}
         onSelect={selectConversation}
         onNew={handleNew}
         onDelete={handleDelete}
@@ -286,32 +308,29 @@ export default function ChatPage() {
                 ))}
               </AnimatePresence>
 
-              {/* Streaming assistant message */}
-              {streaming && streamText && (
+              {/* Status pill — shows immediately when streaming starts */}
+              {streaming && (
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   style={styles.streamingWrap}
                 >
-                  <div style={styles.streamingAvatar}>✦</div>
                   <div style={styles.streamingBubble}>
-                    <StreamingMessage text={streamText} />
-                    {isTTSLoading && (
-                      <p style={styles.ttsHint}>Generating voice…</p>
+                    {/* Stream text renders as it arrives */}
+                    {streamText && <StreamingMessage text={streamText} />}
+
+                    {/* Status pill always visible while streaming */}
+                    {statusPill && (
+                      <div style={{
+                        ...styles.statusPill,
+                        marginTop: streamText ? 8 : 0,
+                      }}>
+                        {statusPill.icon}
+                        <span>{statusPill.text}</span>
+                      </div>
                     )}
                   </div>
                 </motion.div>
-              )}
-
-              {/* TTS loading without stream text (e.g. after stream done) */}
-              {!streaming && isTTSLoading && (
-                <motion.p
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  style={styles.ttsHint}
-                >
-                  Generating voice…
-                </motion.p>
               )}
 
               <div ref={bottomRef} />
@@ -319,6 +338,21 @@ export default function ChatPage() {
 
             {/* Input bar */}
             <div style={styles.inputBar}>
+              {/* Auto-read toggle above input */}
+              <div style={styles.autoReadRow}>
+                <button
+                  style={{
+                    ...styles.autoReadBtn,
+                    ...(autoRead ? styles.autoReadBtnOn : {}),
+                  }}
+                  onClick={() => setAutoRead((v) => !v)}
+                  title="Auto-read AI responses aloud"
+                >
+                  <span style={styles.autoReadDot} />
+                  Auto-read {autoRead ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
               <div className="input-bar-wrap" style={styles.inputWrap}>
                 <textarea
                   ref={inputRef}
@@ -332,14 +366,17 @@ export default function ChatPage() {
                 />
 
                 <div style={styles.inputActions}>
+                  <button
+                    style={styles.voiceCallBtn}
+                    onClick={() => navigate(`/voice-call/${activeId || 'new'}`)}
+                    title="Real-time Voice Call"
+                  >
+                    <Phone size={16} />
+                  </button>
+
                   <VoiceRecorderBtn
                     onRecordingComplete={handleVoiceRecording}
                     disabled={streaming}
-                  />
-
-                  <AutoReadToggle
-                    enabled={autoRead}
-                    onToggle={() => setAutoRead((v) => !v)}
                   />
 
                   <motion.button
@@ -366,7 +403,7 @@ export default function ChatPage() {
               style={styles.emptyContent}
             >
               <div style={styles.emptyIcon}>
-                <Sparkles size={32} color="#a78bfa" />
+                <Sparkles size={32} color="#25d366" />
               </div>
               <h2 style={styles.emptyTitle}>
                 Start a <span className="gradient-text">conversation</span>
@@ -374,7 +411,7 @@ export default function ChatPage() {
               <p style={styles.emptySubtitle}>
                 Click "New Chat" or select a conversation from the sidebar.
                 <br />
-                You can type, record voice, or use a real-time voice call.
+                You can type or record a voice message.
               </p>
               <button
                 className="btn btn-primary"
@@ -419,19 +456,6 @@ const styles = {
     gap: 10,
     marginTop: 4,
   },
-  streamingAvatar: {
-    width: 30,
-    height: 30,
-    borderRadius: '50%',
-    background: 'var(--gradient-brand)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-    marginTop: 4,
-    fontSize: 14,
-    boxShadow: '0 2px 8px var(--accent-glow)',
-  },
   streamingBubble: {
     background: 'var(--bg-glass-strong)',
     border: '1px solid var(--border)',
@@ -441,22 +465,58 @@ const styles = {
     backdropFilter: 'blur(12px)',
     maxWidth: '72%',
   },
-  ttsHint: {
+  statusPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: '0.78rem',
+    color: 'var(--text-muted)',
+    background: 'rgba(255,255,255,0.06)',
+    border: '1px solid var(--border)',
+    borderRadius: 999,
+    padding: '4px 10px',
+    animation: 'shimmer 1.4s ease-in-out infinite',
+  },
+  autoReadRow: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    paddingBottom: 6,
+  },
+  autoReadBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
     fontSize: '0.75rem',
     color: 'var(--text-muted)',
-    marginTop: 6,
-    paddingLeft: 40,
-    animation: 'shimmer 1.2s ease-in-out infinite',
+    background: 'var(--bg-surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 999,
+    padding: '5px 12px',
+    cursor: 'pointer',
+    fontFamily: 'Inter, sans-serif',
+    transition: 'all 0.2s',
+  },
+  autoReadBtnOn: {
+    color: '#25d366',
+    borderColor: 'rgba(37,211,102,0.4)',
+    background: 'rgba(37,211,102,0.1)',
+  },
+  autoReadDot: {
+    width: 7,
+    height: 7,
+    borderRadius: '50%',
+    background: 'currentColor',
+    display: 'inline-block',
   },
   inputBar: {
-    padding: '12px 24px 20px',
+    padding: '10px 24px 20px',
     borderTop: '1px solid var(--border)',
     background: 'rgba(7,7,15,0.8)',
     backdropFilter: 'blur(20px)',
   },
   inputWrap: {
     display: 'flex',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     gap: 10,
     background: 'var(--bg-glass)',
     border: '1px solid var(--border)',
@@ -477,7 +537,8 @@ const styles = {
     resize: 'none',
     maxHeight: 160,
     overflowY: 'auto',
-    padding: 0,
+    padding: '2px 0',
+    alignSelf: 'center',
   },
   inputActions: {
     display: 'flex',
@@ -485,11 +546,26 @@ const styles = {
     gap: 8,
     flexShrink: 0,
   },
+  voiceCallBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: '50%',
+    border: '1px solid var(--border-accent)',
+    background: 'var(--gradient-brand-subtle)',
+    color: 'var(--accent-primary)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    flexShrink: 0,
+    transition: 'all 0.2s',
+  },
   sendBtn: {
     width: 38,
     height: 38,
     padding: 0,
     borderRadius: '50%',
+    flexShrink: 0,
   },
   emptyState: {
     flex: 1,

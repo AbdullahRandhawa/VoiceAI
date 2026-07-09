@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from routers.auth import get_current_user
-from services import firestore as firestore_service
+from services import cloudinary_service, firestore as firestore_service
 
 router = APIRouter()
 
@@ -39,5 +39,21 @@ async def get_messages(conversation_id: str, user: dict = Depends(get_current_us
 async def delete_conversation(
     conversation_id: str, user: dict = Depends(get_current_user)
 ):
+    # Fetch all messages to find audio URLs before deletion
+    messages = await firestore_service.get_messages(conversation_id)
+    audio_public_ids = [
+        m.get("audio_url") for m in messages
+        if m.get("audio_url")
+    ]
+
+    # Delete conversation and messages from Firestore
     await firestore_service.delete_conversation(conversation_id)
+
+    # Delete Cloudinary audio files (fire-and-forget, don't fail if error)
+    for url in audio_public_ids:
+        try:
+            await cloudinary_service.delete_audio_by_url(url)
+        except Exception:
+            pass  # Best effort
+
     return {"success": True}

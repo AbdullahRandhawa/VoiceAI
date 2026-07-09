@@ -8,8 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from routers.auth import get_current_user
-from services import firestore as firestore_service
-from services import openrouter
+from services import cloudinary_service, firestore as firestore_service, openrouter
 
 router = APIRouter()
 
@@ -24,6 +23,7 @@ SYSTEM_PROMPT = (
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
+    skip_user_save: bool = False
 
 
 @router.post("/")
@@ -39,10 +39,11 @@ async def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     history = await firestore_service.get_messages(body.conversation_id)
     is_first_message = len(history) == 0
 
-    # Persist the user's message immediately
-    await firestore_service.save_message(
-        body.conversation_id, "user", body.message
-    )
+    # Persist the user's message immediately (unless skipped)
+    if not body.skip_user_save:
+        await firestore_service.save_message(
+            body.conversation_id, "user", body.message
+        )
 
     # Build message list for the LLM
     llm_messages = [
@@ -59,9 +60,17 @@ async def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
 
         complete = "".join(full_response)
 
-        # Persist assistant message
+        # Generate TTS here on the backend so the audio_url is persisted!
+        try:
+            audio_bytes = await openrouter.text_to_speech(complete)
+            upload = await cloudinary_service.upload_audio(audio_bytes, filename="audio.mp3")
+            audio_url = upload["url"]
+        except Exception:
+            audio_url = None
+
+        # Persist assistant message with audio_url
         saved = await firestore_service.save_message(
-            body.conversation_id, "assistant", complete
+            body.conversation_id, "assistant", complete, audio_url=audio_url
         )
 
         # Auto-title the conversation from the first user message
@@ -71,7 +80,7 @@ async def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
                 body.conversation_id, short_title
             )
 
-        yield f"data: {json.dumps({'done': True, 'message_id': saved['id']})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'message_id': saved['id'], 'audio_url': audio_url})}\n\n"
 
     return StreamingResponse(
         generate(),

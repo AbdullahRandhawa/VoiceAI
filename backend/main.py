@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from routers import audio, chat, conversations, voice_call
+from routers import audio, auth, chat, conversations, voice_call
 
 app = FastAPI(
     title="AI Voice Assistant API",
@@ -23,6 +23,7 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(audio.router, prefix="/audio", tags=["Audio"])
 app.include_router(conversations.router, prefix="/conversations", tags=["Conversations"])

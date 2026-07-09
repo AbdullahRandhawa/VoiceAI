@@ -20,6 +20,8 @@ db = fs.client()
 
 def _serialize(data: dict) -> dict:
     """Convert Firestore datetime/server-timestamp objects to ISO strings."""
+    if not data:
+        return data
     out = {}
     for k, v in data.items():
         if isinstance(v, datetime.datetime):
@@ -29,6 +31,32 @@ def _serialize(data: dict) -> dict:
     return out
 
 
+# ── Users ────────────────────────────────────────────────────────────────────
+
+async def upsert_user_document(uid: str, email: str, display_name: Optional[str] = None, photo_url: Optional[str] = None, provider: str = "email") -> None:
+    def _upsert():
+        user_ref = db.collection("users").document(uid)
+        doc = user_ref.get()
+        now = datetime.datetime.utcnow()
+        
+        data = {
+            "uid": uid,
+            "email": email,
+            "display_name": display_name,
+            "photo_url": photo_url,
+            "provider": provider,
+            "last_login_at": now
+        }
+        
+        if not doc.exists:
+            data["created_at"] = now
+            user_ref.set(data)
+        else:
+            user_ref.set(data, merge=True)
+            
+    await asyncio.to_thread(_upsert)
+
+
 # ── Conversations ────────────────────────────────────────────────────────────
 
 async def get_conversations(user_id: str) -> list[dict]:
@@ -36,9 +64,11 @@ async def get_conversations(user_id: str) -> list[dict]:
         ref = (
             db.collection("conversations")
             .where("user_id", "==", user_id)
-            .order_by("updated_at", direction=fs.Query.DESCENDING)
         )
-        return [{"id": doc.id, **_serialize(doc.to_dict())} for doc in ref.stream()]
+        results = [{"id": doc.id, **_serialize(doc.to_dict())} for doc in ref.stream()]
+        # Sort in memory to avoid requiring a Firestore composite index
+        results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        return results
 
     return await asyncio.to_thread(_get)
 

@@ -16,23 +16,77 @@ _HEADERS = {
 }
 
 
-async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> str:
-    """Convert audio bytes → transcript string via OpenRouter STT."""
-    # Detect MIME type from filename
-    ext = filename.rsplit(".", 1)[-1].lower()
-    mime_map = {"webm": "audio/webm", "wav": "audio/wav", "mp3": "audio/mpeg", "m4a": "audio/mp4", "ogg": "audio/ogg"}
-    mime = mime_map.get(ext, "audio/webm")
+import subprocess
+import tempfile
+import os
 
+async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> str:
+    """Convert audio bytes → transcript string via Whisper on OpenRouter.
+    
+    Strategy: Use ffmpeg to convert any browser audio format (webm/opus, mp4, ogg)
+    into a 16kHz mono WAV, then send to whisper-large-v3 which handles WAV reliably.
+    """
+    # Determine input extension from filename
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "webm"
+    
+    # Write input to a temp file
+    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f_in:
+        f_in.write(audio_bytes)
+        f_in_path = f_in.name
+    
+    f_out_path = f_in_path + ".wav"
+    
+    try:
+        # Convert to 16kHz mono WAV — universally accepted by Whisper
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", f_in_path,
+                "-ar", "16000",   # 16kHz sample rate
+                "-ac", "1",       # mono
+                "-c:a", "pcm_s16le",  # 16-bit PCM (standard WAV)
+                f_out_path,
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="ignore")
+            print(f"[STT] ffmpeg conversion failed: {stderr[-300:]}")
+            return ""
+        
+        with open(f_out_path, "rb") as f_out:
+            wav_bytes = f_out.read()
+        
+        print(f"[STT] Converted {ext} ({len(audio_bytes)}B) → WAV ({len(wav_bytes)}B)")
+    except subprocess.TimeoutExpired:
+        print("[STT] ffmpeg timed out")
+        return ""
+    except Exception as e:
+        print(f"[STT] ffmpeg error: {e}")
+        return ""
+    finally:
+        if os.path.exists(f_in_path):
+            os.unlink(f_in_path)
+        if os.path.exists(f_out_path):
+            os.unlink(f_out_path)
+    
+    # Send WAV to Whisper via OpenRouter
     headers = {"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"}
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             f"{settings.OPENROUTER_BASE_URL}/audio/transcriptions",
             headers=headers,
-            files={"file": (filename, audio_bytes, mime)},
+            files={"file": ("audio.wav", wav_bytes, "audio/wav")},
             data={"model": settings.STT_MODEL},
         )
-        response.raise_for_status()
-        return response.json().get("text", "").strip()
+        if response.status_code != 200:
+            print(f"[STT] OpenRouter error {response.status_code}: {response.text}")
+            return ""
+        text = response.json().get("text", "").strip()
+        print(f"[STT] Transcript: '{text}'")
+        return text
+
 
 
 async def chat_stream(
@@ -49,7 +103,7 @@ async def chat_stream(
         "model": settings.LLM_MODEL,
         "messages": payload_messages,
         "stream": True,
-        "max_tokens": 1024,
+        "max_tokens": 500,
         "temperature": 0.7,
     }
 
@@ -80,15 +134,23 @@ async def chat_stream(
 
 
 async def text_to_speech(text: str) -> bytes:
-    """Convert text → MP3 audio bytes via OpenRouter TTS."""
+    """Convert text → MP3 audio bytes via OpenRouter TTS (Kokoro 82M)."""
+    # Kokoro voices: af_heart, af_sky, bf_emma, am_adam, bm_lewis, etc.
+    # If TTS_VOICE is set to a Gemini voice like 'Aoede', fall back to af_heart
+    voice = settings.TTS_VOICE
+    gemini_voices = {"Aoede", "Charon", "Fenrir", "Kore", "Puck"}
+    if voice in gemini_voices:
+        voice = "af_heart"
+
     payload = {
         "model": settings.TTS_MODEL,
         "input": text,
-        "voice": settings.TTS_VOICE,
+        "voice": voice,
+        "response_format": "mp3",
     }
     headers = {**_HEADERS, "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(
             f"{settings.OPENROUTER_BASE_URL}/audio/speech",
             headers=headers,

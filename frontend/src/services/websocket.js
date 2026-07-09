@@ -7,7 +7,7 @@
  *   Server → binary  : MP3 audio chunk (one per TTS sentence)
  */
 import { getIdToken } from './auth';
-import { playAudioBytes } from './audio';
+import { playChunkBytes } from './audio';
 
 const WS_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000')
   .replace(/^http/, 'ws');
@@ -17,7 +17,7 @@ export class VoiceCallService {
   audioQueue = [];
   isPlaying = false;
 
-  async connect(callbacks) {
+  async connect(conversationId, callbacks) {
     // NOTE: Firebase tokens can be sent as a query param since WS headers
     // aren't supported in browsers. The backend should validate this.
     let token = '';
@@ -27,8 +27,11 @@ export class VoiceCallService {
       callbacks.onError('Not authenticated');
       return;
     }
-
-    this.ws = new WebSocket(`${WS_URL}/ws/voice-call?token=${token}`);
+    let url = `${WS_URL}/ws/voice-call?token=${token}`;
+    if (conversationId) {
+      url += `&conversation_id=${conversationId}`;
+    }
+    this.ws = new WebSocket(url);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onmessage = async (event) => {
@@ -67,10 +70,7 @@ export class VoiceCallService {
     return new Promise((resolve, reject) => {
       if (!this.ws) return reject(new Error('No WebSocket'));
       this.ws.onopen = () => resolve();
-      this.ws.onerror = (e) => {
-        callbacks.onError('Failed to connect to voice call server');
-        reject(e);
-      };
+      // Only set onerror if not already set, or rely on the instance's onerror
     });
   }
 
@@ -78,7 +78,7 @@ export class VoiceCallService {
     if (this.isPlaying || this.audioQueue.length === 0) return;
     this.isPlaying = true;
     const chunk = this.audioQueue.shift();
-    const audio = playAudioBytes(chunk);
+    const audio = playChunkBytes(chunk);
     audio.onended = () => {
       this.isPlaying = false;
       this._drainQueue();

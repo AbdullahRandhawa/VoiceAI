@@ -15,28 +15,33 @@ true real-time microphone chunk streaming.
 import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from firebase_admin import auth as firebase_auth
-from services import openrouter
+from services import openrouter, firestore as firestore_service
 
 router = APIRouter()
 
 # Sentence boundary detector — splits on ., !, ? followed by whitespace or end
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
+# We use findall to keep the delimiters instead of dropping them
+_SENTENCE_END = re.compile(r"([^.!?]+[.!?]+)")
 
 
 def _split_sentences(text: str) -> tuple[list[str], str]:
     """
     Returns (complete_sentences, leftover_fragment).
     """
-    parts = _SENTENCE_END.split(text)
-    if len(parts) <= 1:
-        return [], text
-    return parts[:-1], parts[-1]
+    sentences = _SENTENCE_END.findall(text)
+    
+    # Calculate leftover
+    matched_length = sum(len(s) for s in sentences)
+    leftover = text[matched_length:]
+    
+    return sentences, leftover
 
 
 @router.websocket("/voice-call")
 async def voice_call_ws(
     websocket: WebSocket,
     token: str = Query(..., description="Firebase ID token"),
+    conversation_id: str = Query(None, description="Optional conversation ID to save messages"),
 ):
     """
     WebSocket flow:
@@ -75,6 +80,15 @@ async def voice_call_ws(
 
             await websocket.send_json({"type": "transcript", "text": transcript})
 
+            if conversation_id:
+                # Save user's voice transcript to Firestore
+                await firestore_service.save_message(
+                    conversation_id,
+                    role="user",
+                    content=transcript,
+                    transcript=transcript
+                )
+
             # ── 3+4. Stream LLM → sentence-level TTS ────────────────────
             buffer = ""
             full_response: list[str] = []
@@ -108,6 +122,15 @@ async def voice_call_ws(
                         await websocket.send_bytes(audio_chunk)
                     except Exception:
                         pass
+                
+                # Save AI response to Firestore
+                if conversation_id:
+                    complete_response = "".join(full_response)
+                    await firestore_service.save_message(
+                        conversation_id,
+                        role="assistant",
+                        content=complete_response
+                    )
 
             except Exception as exc:
                 await websocket.send_json(
