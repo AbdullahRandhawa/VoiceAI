@@ -43,7 +43,7 @@ export default function App() {
             element={<ProtectedRoute><ChatPage /></ProtectedRoute>}
           />
           <Route
-            path="/voice-call"
+            path="/voice-call/:conversationId?"
             element={<ProtectedRoute><VoiceCallPage /></ProtectedRoute>}
           />
           <Route path="*" element={<Navigate to="/chat" replace />} />

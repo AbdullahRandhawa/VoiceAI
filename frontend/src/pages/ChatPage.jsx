@@ -5,89 +5,173 @@ import React, {
   useState,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Sparkles, MessageSquarePlus, Phone, Loader2 } from 'lucide-react';
+import { Send, Sparkles, MessageSquarePlus, Loader2, Phone, PhoneOff, Play, Pause } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
-  createConversation,
-  deleteConversation,
-  getConversations,
-  getMessages,
+  createChat,
+  deleteChat,
+  getChats,
+  getChatMessages,
   streamChat,
   transcribeAudio,
+  getCalls,
+  deleteCall,
+  getCallMessages,
 } from '../services/api';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import MessageBubble from '../components/MessageBubble';
 import StreamingMessage from '../components/StreamingMessage';
 import VoiceRecorderBtn from '../components/VoiceRecorder';
 
+const formatTime = (secs) => {
+  if (isNaN(secs)) return '0:00';
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+};
+
 export default function ChatPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const [conversations, setConversations] = useState([]);
+  const [conversations, setConversations] = useState([]); // chats
+  const [calls, setCalls] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamText, setStreamText] = useState('');
-  const [streamPhase, setStreamPhase] = useState('idle'); // 'idle' | 'thinking' | 'streaming' | 'audio'
-  const [autoRead, setAutoRead] = useState(false);
+  const [streamPhase, setStreamPhase] = useState('idle');
   const [loadingConversations, setLoadingConversations] = useState(true);
+
+  // Audio Playback states for Calls
+  const callAudioRef = useRef(null);
+  const [audioPlaying, setAudioPlaying] = useState(false);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
 
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
+  const voiceRecorderRef = useRef(null);
 
-  // ── Load conversations when user is authenticated ────────────────────────
-  useEffect(() => {
-    if (user) {
-      loadConversations();
-    }
-  }, [user]);
+  // Determine if active item is a call
+  const activeCall = calls.find(c => c.id === activeId);
+  const isCall = !!activeCall;
 
-  const loadConversations = async () => {
+  // ── Load chats + calls when user is authenticated ─────────────────────────
+  const loadAll = useCallback(async () => {
     try {
       setLoadingConversations(true);
-      const res = await getConversations();
-      setConversations(res.data.conversations || []);
+      const [convRes, callsRes] = await Promise.all([
+        getChats(),
+        getCalls(),
+      ]);
+      setConversations(convRes.data.chats || []);
+      setCalls(callsRes.data.calls || []);
+      return { conversations: convRes.data.chats || [], calls: callsRes.data.calls || [] };
     } catch {
-      // Silently fail — user will see empty list
+      return { conversations: [], calls: [] };
     } finally {
       setLoadingConversations(false);
     }
-  };
+  }, []);
 
-  // ── Select conversation → load messages ──────────────────────────────────
-  const selectConversation = useCallback(async (id) => {
+  useEffect(() => {
+    if (user) {
+      loadAll();
+    }
+  }, [user, loadAll]);
+
+  // ── Select chat or call ───────────────────────────────────────────────
+  const selectItem = useCallback(async (id, isCallItem) => {
+    // Stop any playing audio before switching
+    if (callAudioRef.current) {
+      callAudioRef.current.pause();
+      callAudioRef.current = null;
+    }
     setActiveId(id);
     setStreamText('');
     setStreamPhase('idle');
-    try {
-      const res = await getMessages(id);
-      setMessages(res.data.messages || []);
-    } catch {
-      setMessages([]);
+    setAudioPlaying(false);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
+    
+    if (isCallItem) {
+      try {
+        const res = await getCallMessages(id);
+        const mapped = [];
+        (res.data.messages || []).forEach(msg => {
+          mapped.push({
+            id: `${msg.id}-u`,
+            role: 'user',
+            content: msg.transcript,
+            created_at: msg.created_at
+          });
+          mapped.push({
+            id: `${msg.id}-a`,
+            role: 'assistant',
+            content: msg.response,
+            created_at: msg.created_at
+          });
+        });
+        setMessages(mapped);
+      } catch {
+        setMessages([]);
+      }
+    } else {
+      try {
+        const res = await getChatMessages(id);
+        setMessages(res.data.messages || []);
+      } catch {
+        setMessages([]);
+      }
     }
   }, []);
 
-  // ── New conversation ──────────────────────────────────────────────────────
+  // Handle direct navigation selection (passed via router state, e.g. from VoiceCallPage sidebar click)
+  useEffect(() => {
+    const checkStateSelection = async () => {
+      if (location.state?.activeId) {
+        const selectedId = location.state.activeId;
+        // First load all if they aren't loaded yet to ensure calls/conversations are populated
+        const currentData = (conversations.length === 0 && calls.length === 0) 
+          ? await loadAll()
+          : { conversations, calls };
+        
+        const isCallItem = currentData.calls.some(c => c.id === selectedId);
+        selectItem(selectedId, isCallItem);
+        // Clear the state so it doesn't re-select on every navigation refresh
+        navigate(location.pathname, { replace: true, state: {} });
+      }
+    };
+    checkStateSelection();
+  }, [location.state, conversations, calls, loadAll, selectItem, navigate, location.pathname]);
+
+  // ── New Chat ──────────────────────────────────────────────────────────────
   const handleNew = async () => {
-    if (activeId && messages.length === 0) return; // Prevent unlimited empty chats
+    if (activeId && messages.length === 0) return;
     try {
-      const res = await createConversation();
-      const conv = res.data;
-      setConversations((prev) => [conv, ...prev]);
-      setActiveId(conv.id);
+      const res = await createChat();
+      const chatDoc = res.data;
+      setConversations((prev) => [chatDoc, ...prev]);
+      setActiveId(chatDoc.id);
       setMessages([]);
     } catch {
-      alert('Failed to create conversation.');
+      alert('Failed to create chat.');
     }
   };
 
-  // ── Delete conversation (also deletes Cloudinary assets via backend) ──────
+  // ── New Call — navigate to voice call page ────────────────────────────────
+  const handleNewCall = () => {
+    navigate('/voice-call/new');
+  };
+
+  // ── Delete chat ───────────────────────────────────────────────────────────
   const handleDelete = async (id) => {
-    await deleteConversation(id);
+    await deleteChat(id);
     setConversations((prev) => prev.filter((c) => c.id !== id));
     if (activeId === id) {
       setActiveId(null);
@@ -95,24 +179,38 @@ export default function ChatPage() {
     }
   };
 
-  // ── Scroll to bottom on new messages ─────────────────────────────────────
+  // ── Delete call record ────────────────────────────────────────────────────
+  const handleDeleteCall = async (id) => {
+    await deleteCall(id);
+    setCalls((prev) => prev.filter((c) => c.id !== id));
+    if (activeId === id) {
+      setActiveId(null);
+      setMessages([]);
+    }
+  };
+
+  // ── Scroll to bottom ─────────────────────────────────────────────────────
   useEffect(() => {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, streamText, streamPhase]);
 
-  // ── Send text message ─────────────────────────────────────────────────────
+  // ── Send (text or voice) ──────────────────────────────────────────────────
   const handleSend = async () => {
+    // If voice recorder is active, send the recording instead
+    if (voiceRecorderRef.current?.isRecording()) {
+      await voiceRecorderRef.current.sendRecording();
+      return;
+    }
     const text = input.trim();
-    if (!text || !activeId || streaming) return;
+    if (!text || !activeId || streaming || isCall) return;
 
-    setInput('');;
+    setInput('');
     setStreaming(true);
     setStreamText('');
     setStreamPhase('thinking');
 
-    // Optimistically add user message to UI
     const tempUserMsg = {
       id: `temp-${Date.now()}`,
       role: 'user',
@@ -123,70 +221,75 @@ export default function ChatPage() {
 
     let finalText = '';
 
-    await streamChat(
-      activeId,
-      text,
-      (token) => {
-        finalText += token;
-        setStreamText(finalText);
-        setStreamPhase('streaming');
-      },
-      async (msgId, audioUrl) => {
-        // Commit message with audio_url fully populated
-        const assistantMsg = {
-          id: msgId,
-          role: 'assistant',
-          content: finalText,
-          audio_url: audioUrl || null,
-          autoPlay: autoRead && !!audioUrl,
-          created_at: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-
-        // Clear streaming state
-        setStreaming(false);
-        setStreamText('');
-        setStreamPhase('idle');
-
-        loadConversations();
-      },
-      (err) => {
-        setStreaming(false);
-        setStreamText('');
-        setStreamPhase('idle');
-        console.error('Stream error:', err);
-      }
-    );
+      await streamChat(
+        activeId,
+        text,
+        (token) => {
+          finalText += token;
+          setStreamText(finalText);
+          setStreamPhase('streaming');
+        },
+        async (msgId, audioUrl, audioGenerating) => {
+          const assistantMsg = {
+            id: msgId,
+            role: 'assistant',
+            content: finalText,
+            audio_url: audioUrl || null,
+            audio_generating: audioGenerating || false,
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          setStreaming(false);
+          setStreamText('');
+          setStreamPhase('idle');
+        },
+        (err) => {
+          setStreaming(false);
+          setStreamText('');
+          setStreamPhase('idle');
+          console.error('Stream error:', err);
+        },
+        false,
+        (msgId, audioUrl) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId
+                ? { ...m, audio_url: audioUrl, audio_generating: false }
+                : m
+            )
+          );
+        }
+      );
   };
 
-  // ── Voice message ─────────────────────────────────────────────────────────
+  // ── Voice message (only for chats) ─────────────────────────────────────────
   const handleVoiceRecording = async (blob) => {
     if (!user) {
       alert('Please sign in to send voice messages');
       return;
     }
+    if (isCall) return;
 
     if (!activeId) {
       try {
-        const res = await createConversation('New Chat');
-        const conv = res.data;
-        setConversations((prev) => [conv, ...prev]);
-        setActiveId(conv.id);
-        await handleVoiceWithConvId(blob, conv.id);
+        const res = await createChat('New Chat');
+        const chatDoc = res.data;
+        setConversations((prev) => [chatDoc, ...prev]);
+        setActiveId(chatDoc.id);
+        await handleVoiceWithChatId(blob, chatDoc.id);
       } catch {
-        alert('Failed to create conversation.');
+        alert('Failed to create chat.');
       }
     } else {
-      await handleVoiceWithConvId(blob, activeId);
+      await handleVoiceWithChatId(blob, activeId);
     }
   };
 
-  const handleVoiceWithConvId = async (blob, convId) => {
+  const handleVoiceWithChatId = async (blob, chatId) => {
     try {
       setStreaming(true);
       setStreamPhase('thinking');
 
-      // Optimistically show placeholder voice message while uploading
       const tempId = `voice-temp-${Date.now()}`;
       const placeholderMsg = {
         id: tempId,
@@ -199,10 +302,9 @@ export default function ChatPage() {
       };
       setMessages((prev) => [...prev, placeholderMsg]);
 
-      const res = await transcribeAudio(blob, convId);
+      const res = await transcribeAudio(blob, chatId);
       const { transcript, audio_url, message_id } = res.data;
 
-      // Replace placeholder with real message
       const userMsg = {
         id: message_id,
         role: 'user',
@@ -213,33 +315,31 @@ export default function ChatPage() {
       };
       setMessages((prev) => prev.map((m) => m.id === tempId ? userMsg : m));
 
-      // Stream LLM response for the transcript
       let finalText = '';
       setStreamText('');
       setStreamPhase('thinking');
 
       await streamChat(
-        convId,
+        chatId,
         transcript,
         (token) => {
           finalText += token;
           setStreamText(finalText);
           setStreamPhase('streaming');
         },
-        async (msgId, audioUrl) => {
+        async (msgId, audioUrl, audioGenerating) => {
           const assistantMsg = {
             id: msgId,
             role: 'assistant',
             content: finalText,
             audio_url: audioUrl || null,
-            autoPlay: !!audioUrl, // Always auto-play voice message responses
+            audio_generating: audioGenerating || false,
             created_at: new Date().toISOString(),
           };
           setMessages((prev) => [...prev, assistantMsg]);
           setStreaming(false);
           setStreamText('');
           setStreamPhase('idle');
-          loadConversations();
         },
         (err) => {
           setStreaming(false);
@@ -247,7 +347,16 @@ export default function ChatPage() {
           setStreamPhase('idle');
           console.error(err);
         },
-        true // skipUserSave
+        true, // skipUserSave
+        (msgId, audioUrl) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId
+                ? { ...m, audio_url: audioUrl, audio_generating: false }
+                : m
+            )
+          );
+        }
       );
     } catch (err) {
       setStreaming(false);
@@ -256,7 +365,7 @@ export default function ChatPage() {
     }
   };
 
-  // ── Keyboard: Enter sends, Shift+Enter = newline ──────────────────────────
+  // ── Keyboard ──────────────────────────────────────────────────────────────
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -264,7 +373,6 @@ export default function ChatPage() {
     }
   };
 
-  // ── Auto-resize textarea ──────────────────────────────────────────────────
   const handleInputChange = (e) => {
     setInput(e.target.value);
     const el = e.target;
@@ -272,23 +380,24 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   };
 
-  // ── Status pill text ──────────────────────────────────────────────────────
   const statusPill = streamPhase === 'thinking'
     ? { text: 'Thinking…', icon: <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> }
     : streamPhase === 'streaming'
-    ? { text: 'Generating audio…', icon: <span style={{ fontSize: 12 }}>🎵</span> }
+    ? { text: 'Generating…', icon: <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> }
     : null;
 
   return (
     <div style={styles.root}>
-      {/* Sidebar */}
       <Sidebar
         conversations={conversations}
+        calls={calls}
         activeId={activeId}
         loading={loadingConversations}
-        onSelect={selectConversation}
+        onSelect={selectItem}
         onNew={handleNew}
+        onNewCall={handleNewCall}
         onDelete={handleDelete}
+        onDeleteCall={handleDeleteCall}
         user={{
           displayName: user?.displayName,
           email: user?.email,
@@ -308,28 +417,30 @@ export default function ChatPage() {
                 ))}
               </AnimatePresence>
 
-              {/* Status pill — shows immediately when streaming starts */}
+              {/* Italic call ended text at the bottom of the bubbles panel (no bubble container) */}
+              {isCall && (
+                <div style={styles.callEndedText}>
+                  <PhoneOff size={14} style={{ opacity: 0.6 }} />
+                  <span>This call has ended. You can review the transcript above or listen to the recording.</span>
+                </div>
+              )}
+
               {streaming && (
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   style={styles.streamingWrap}
                 >
-                  <div style={styles.streamingBubble}>
-                    {/* Stream text renders as it arrives */}
-                    {streamText && <StreamingMessage text={streamText} />}
-
-                    {/* Status pill always visible while streaming */}
-                    {statusPill && (
-                      <div style={{
-                        ...styles.statusPill,
-                        marginTop: streamText ? 8 : 0,
-                      }}>
-                        {statusPill.icon}
-                        <span>{statusPill.text}</span>
-                      </div>
-                    )}
-                  </div>
+                  {streamText && <StreamingMessage text={streamText} />}
+                  {statusPill && (
+                    <div style={{
+                      ...styles.statusPill,
+                      marginTop: streamText ? 8 : 0,
+                    }}>
+                      {statusPill.icon}
+                      <span>{statusPill.text}</span>
+                    </div>
+                  )}
                 </motion.div>
               )}
 
@@ -338,63 +449,99 @@ export default function ChatPage() {
 
             {/* Input bar */}
             <div style={styles.inputBar}>
-              {/* Auto-read toggle above input */}
-              <div style={styles.autoReadRow}>
-                <button
-                  style={{
-                    ...styles.autoReadBtn,
-                    ...(autoRead ? styles.autoReadBtnOn : {}),
-                  }}
-                  onClick={() => setAutoRead((v) => !v)}
-                  title="Auto-read AI responses aloud"
-                >
-                  <span style={styles.autoReadDot} />
-                  Auto-read {autoRead ? 'ON' : 'OFF'}
-                </button>
-              </div>
+              {isCall ? (
+                /* Custom Audio playback bar instead of input field */
+                <div style={styles.audioPlaybackBar}>
+                  {activeCall?.audio_url ? (
+                    <>
+                      <audio
+                        ref={callAudioRef}
+                        src={activeCall.audio_url}
+                        onPlay={() => setAudioPlaying(true)}
+                        onPause={() => setAudioPlaying(false)}
+                        onEnded={() => setAudioPlaying(false)}
+                        onTimeUpdate={() => setAudioCurrentTime(callAudioRef.current?.currentTime || 0)}
+                        onLoadedMetadata={() => setAudioDuration(callAudioRef.current?.duration || 0)}
+                      />
+                      <button
+                        style={styles.playBtn}
+                        onClick={() => {
+                          if (audioPlaying) {
+                            callAudioRef.current?.pause();
+                          } else {
+                            callAudioRef.current?.play();
+                          }
+                        }}
+                      >
+                        {audioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+                      </button>
+                      
+                      <div style={styles.audioTrackInfo}>
+                        <span style={styles.audioTrackTitle}>Voice Call Recording</span>
+                        <span style={styles.audioTrackTime}>
+                          {formatTime(audioCurrentTime)} / {formatTime(audioDuration)}
+                        </span>
+                      </div>
 
-              <div className="input-bar-wrap" style={styles.inputWrap}>
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={handleInputChange}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Ask anything… (Shift+Enter for newline)"
-                  rows={1}
-                  disabled={streaming}
-                  style={styles.textarea}
-                />
-
-                <div style={styles.inputActions}>
-                  <button
-                    style={styles.voiceCallBtn}
-                    onClick={() => navigate(`/voice-call/${activeId || 'new'}`)}
-                    title="Real-time Voice Call"
-                  >
-                    <Phone size={16} />
-                  </button>
-
-                  <VoiceRecorderBtn
-                    onRecordingComplete={handleVoiceRecording}
-                    disabled={streaming}
-                  />
-
-                  <motion.button
-                    whileTap={{ scale: 0.9 }}
-                    onClick={handleSend}
-                    disabled={!input.trim() || streaming}
-                    className="btn btn-primary"
-                    style={styles.sendBtn}
-                    id="send-message-btn"
-                  >
-                    <Send size={16} />
-                  </motion.button>
+                      <div style={styles.audioProgressBarWrap} onClick={(e) => {
+                        if (!callAudioRef.current || !audioDuration) return;
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const clickX = e.clientX - rect.left;
+                        const percentage = clickX / rect.width;
+                        callAudioRef.current.currentTime = percentage * audioDuration;
+                      }}>
+                        <div style={{
+                          ...styles.audioProgressBarFill,
+                          width: `${(audioCurrentTime / (audioDuration || 1)) * 100}%`
+                        }} />
+                      </div>
+                    </>
+                  ) : (
+                    <div style={styles.noAudioMessage}>
+                      <span>No audio recording available for this call.</span>
+                    </div>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <>
+                  <div className="input-bar-wrap" style={styles.inputPillWrap}>
+                    <div style={styles.inputWrap}>
+                      <textarea
+                        ref={inputRef}
+                        value={input}
+                        onChange={handleInputChange}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Type your message here…"
+                        rows={1}
+                        disabled={streaming}
+                        style={styles.textarea}
+                      />
+
+                      <div style={styles.inputActions}>
+                        <VoiceRecorderBtn
+                          ref={voiceRecorderRef}
+                          onRecordingComplete={handleVoiceRecording}
+                          disabled={streaming}
+                        />
+
+                        <motion.button
+                          whileTap={{ scale: 0.9 }}
+                          onClick={handleSend}
+                          disabled={(!input.trim() && !voiceRecorderRef.current?.isRecording()) || streaming}
+                          className="btn btn-primary"
+                          style={styles.sendBtn}
+                          id="send-message-btn"
+                        >
+                          <Send size={20} />
+                        </motion.button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </>
         ) : (
-          /* Empty state — no conversation selected */
           <div style={styles.emptyState}>
             <motion.div
               initial={{ opacity: 0, scale: 0.9 }}
@@ -409,18 +556,31 @@ export default function ChatPage() {
                 Start a <span className="gradient-text">conversation</span>
               </h2>
               <p style={styles.emptySubtitle}>
-                Click "New Chat" or select a conversation from the sidebar.
-                <br />
-                You can type or record a voice message.
+                Click "New Chat" to start chatting, or "New Call" for a real-time voice conversation.
               </p>
-              <button
-                className="btn btn-primary"
-                style={{ marginTop: 8, padding: '12px 28px' }}
-                onClick={handleNew}
-              >
-                <MessageSquarePlus size={16} />
-                New Chat
-              </button>
+              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '12px 28px' }}
+                  onClick={handleNew}
+                >
+                  <MessageSquarePlus size={16} />
+                  New Chat
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  style={{
+                    padding: '12px 28px',
+                    background: 'rgba(139,92,246,0.1)',
+                    border: '1px solid rgba(139,92,246,0.3)',
+                    color: '#a78bfa'
+                  }}
+                  onClick={handleNewCall}
+                >
+                  <Phone size={16} />
+                  New Call
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
@@ -450,11 +610,25 @@ const styles = {
     flexDirection: 'column',
     gap: 4,
   },
+  callEndedText: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: '16px 20px',
+    color: 'var(--text-muted)',
+    fontSize: '0.85rem',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    width: '100%',
+    marginTop: 12,
+  },
   streamingWrap: {
     display: 'flex',
     alignItems: 'flex-start',
     gap: 10,
     marginTop: 4,
+    maxWidth: '80%',
   },
   streamingBubble: {
     background: 'var(--bg-glass-strong)',
@@ -477,53 +651,98 @@ const styles = {
     padding: '4px 10px',
     animation: 'shimmer 1.4s ease-in-out infinite',
   },
-  autoReadRow: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    paddingBottom: 6,
-  },
-  autoReadBtn: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    fontSize: '0.75rem',
-    color: 'var(--text-muted)',
-    background: 'var(--bg-surface)',
-    border: '1px solid var(--border)',
-    borderRadius: 999,
-    padding: '5px 12px',
-    cursor: 'pointer',
-    fontFamily: 'Inter, sans-serif',
-    transition: 'all 0.2s',
-  },
-  autoReadBtnOn: {
-    color: '#25d366',
-    borderColor: 'rgba(37,211,102,0.4)',
-    background: 'rgba(37,211,102,0.1)',
-  },
-  autoReadDot: {
-    width: 7,
-    height: 7,
-    borderRadius: '50%',
-    background: 'currentColor',
-    display: 'inline-block',
-  },
   inputBar: {
     padding: '10px 24px 20px',
     borderTop: '1px solid var(--border)',
     background: 'rgba(7,7,15,0.8)',
     backdropFilter: 'blur(20px)',
   },
-  inputWrap: {
+  audioPlaybackBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    padding: '14px 20px',
+    background: 'var(--bg-glass-strong)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-lg)',
+    width: '100%',
+    backdropFilter: 'blur(12px)',
+  },
+  playBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: '50%',
+    background: 'var(--gradient-brand)',
+    color: '#fff',
+    border: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    boxShadow: '0 4px 14px var(--accent-glow)',
+    transition: 'transform 0.2s',
+  },
+  audioTrackInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    flexShrink: 0,
+  },
+  audioTrackTitle: {
+    fontSize: '0.85rem',
+    fontWeight: 600,
+    color: 'var(--text-primary)',
+  },
+  audioTrackTime: {
+    fontSize: '0.75rem',
+    color: 'var(--text-muted)',
+    fontFamily: 'monospace',
+  },
+  audioProgressBarWrap: {
+    flex: 1,
+    height: 6,
+    borderRadius: 3,
+    background: 'rgba(255,255,255,0.08)',
+    position: 'relative',
+    cursor: 'pointer',
+    overflow: 'hidden',
+  },
+  audioProgressBarFill: {
+    height: '100%',
+    background: 'var(--gradient-brand)',
+    borderRadius: 3,
+    transition: 'width 0.1s linear',
+  },
+  noAudioMessage: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    color: 'var(--text-muted)',
+    fontSize: '0.85rem',
+    fontStyle: 'italic',
+    padding: '8px 0',
+  },
+  inputPillWrap: {
     display: 'flex',
     alignItems: 'center',
     gap: 10,
     background: 'var(--bg-glass)',
     border: '1px solid var(--border)',
-    borderRadius: 'var(--radius-lg)',
-    padding: '10px 14px',
+    borderRadius: 999,
+    padding: '4px 4px 4px 18px',
     backdropFilter: 'blur(12px)',
     transition: 'border-color 0.2s',
+  },
+  inputWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    flex: 1,
+    gap: 10,
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 0,
+    padding: 0,
   },
   textarea: {
     flex: 1,
@@ -545,20 +764,6 @@ const styles = {
     alignItems: 'center',
     gap: 8,
     flexShrink: 0,
-  },
-  voiceCallBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: '50%',
-    border: '1px solid var(--border-accent)',
-    background: 'var(--gradient-brand-subtle)',
-    color: 'var(--accent-primary)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer',
-    flexShrink: 0,
-    transition: 'all 0.2s',
   },
   sendBtn: {
     width: 38,

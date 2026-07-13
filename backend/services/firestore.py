@@ -38,7 +38,7 @@ async def upsert_user_document(uid: str, email: str, display_name: Optional[str]
         user_ref = db.collection("users").document(uid)
         doc = user_ref.get()
         now = datetime.datetime.utcnow()
-        
+
         data = {
             "uid": uid,
             "email": email,
@@ -47,36 +47,35 @@ async def upsert_user_document(uid: str, email: str, display_name: Optional[str]
             "provider": provider,
             "last_login_at": now
         }
-        
+
         if not doc.exists:
             data["created_at"] = now
             user_ref.set(data)
         else:
             user_ref.set(data, merge=True)
-            
+
     await asyncio.to_thread(_upsert)
 
 
-# ── Conversations ────────────────────────────────────────────────────────────
+# ── Chats ────────────────────────────────────────────────────────────────────
 
-async def get_conversations(user_id: str) -> list[dict]:
+async def get_chats(user_id: str) -> list[dict]:
     def _get():
         ref = (
-            db.collection("conversations")
+            db.collection("chats")
             .where("user_id", "==", user_id)
         )
         results = [{"id": doc.id, **_serialize(doc.to_dict())} for doc in ref.stream()]
-        # Sort in memory to avoid requiring a Firestore composite index
         results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
         return results
 
     return await asyncio.to_thread(_get)
 
 
-async def create_conversation(user_id: str, title: str = "New Chat") -> dict:
+async def create_chat(user_id: str, title: str = "New Chat") -> dict:
     def _create():
         now = datetime.datetime.utcnow()
-        doc_ref = db.collection("conversations").document()
+        doc_ref = db.collection("chats").document()
         data = {
             "user_id": user_id,
             "title": title,
@@ -89,37 +88,36 @@ async def create_conversation(user_id: str, title: str = "New Chat") -> dict:
     return await asyncio.to_thread(_create)
 
 
-async def update_conversation_title(conversation_id: str, title: str) -> None:
+async def update_chat_title(chat_id: str, title: str) -> None:
     def _update():
-        db.collection("conversations").document(conversation_id).update(
+        db.collection("chats").document(chat_id).update(
             {"title": title, "updated_at": datetime.datetime.utcnow()}
         )
 
     await asyncio.to_thread(_update)
 
 
-async def delete_conversation(conversation_id: str) -> None:
+async def delete_chat(chat_id: str) -> None:
     def _delete():
-        # Delete all child messages first
         msgs_ref = (
-            db.collection("conversations")
-            .document(conversation_id)
+            db.collection("chats")
+            .document(chat_id)
             .collection("messages")
         )
         for doc in msgs_ref.stream():
             doc.reference.delete()
-        db.collection("conversations").document(conversation_id).delete()
+        db.collection("chats").document(chat_id).delete()
 
     await asyncio.to_thread(_delete)
 
 
-# ── Messages ─────────────────────────────────────────────────────────────────
+# ── Chat Messages ─────────────────────────────────────────────────────────────
 
-async def get_messages(conversation_id: str) -> list[dict]:
+async def get_chat_messages(chat_id: str) -> list[dict]:
     def _get():
         ref = (
-            db.collection("conversations")
-            .document(conversation_id)
+            db.collection("chats")
+            .document(chat_id)
             .collection("messages")
             .order_by("created_at")
         )
@@ -128,8 +126,8 @@ async def get_messages(conversation_id: str) -> list[dict]:
     return await asyncio.to_thread(_get)
 
 
-async def save_message(
-    conversation_id: str,
+async def save_chat_message(
+    chat_id: str,
     role: str,
     content: str,
     audio_url: Optional[str] = None,
@@ -138,8 +136,8 @@ async def save_message(
     def _save():
         now = datetime.datetime.utcnow()
         msg_ref = (
-            db.collection("conversations")
-            .document(conversation_id)
+            db.collection("chats")
+            .document(chat_id)
             .collection("messages")
             .document()
         )
@@ -151,10 +149,116 @@ async def save_message(
             "created_at": now,
         }
         msg_ref.set(data)
-        # Bump the conversation's updated_at timestamp
-        db.collection("conversations").document(conversation_id).update(
+        db.collection("chats").document(chat_id).update(
             {"updated_at": now}
         )
         return {"id": msg_ref.id, **_serialize(data)}
 
     return await asyncio.to_thread(_save)
+
+
+async def update_chat_message_audio(chat_id: str, message_id: str, audio_url: str) -> None:
+    """Update a chat message's audio_url after TTS finishes (background generation)."""
+    def _update():
+        db.collection("chats").document(chat_id).collection("messages").document(message_id).update(
+            {"audio_url": audio_url}
+        )
+
+    await asyncio.to_thread(_update)
+
+
+# ── Calls ─────────────────────────────────────────────────────────────────────
+
+async def create_call(user_id: str, title: str = "Voice Call") -> dict:
+    def _create():
+        now = datetime.datetime.utcnow()
+        doc_ref = db.collection("calls").document()
+        data = {
+            "user_id": user_id,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "audio_url": None,
+        }
+        doc_ref.set(data)
+        return {"id": doc_ref.id, **_serialize(data)}
+
+    return await asyncio.to_thread(_create)
+
+
+async def get_calls(user_id: str) -> list[dict]:
+    def _get():
+        ref = db.collection("calls").where("user_id", "==", user_id)
+        results = [{"id": doc.id, **_serialize(doc.to_dict())} for doc in ref.stream()]
+        results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        return results
+
+    return await asyncio.to_thread(_get)
+
+
+async def delete_call(call_id: str) -> None:
+    def _delete():
+        msgs_ref = (
+            db.collection("calls")
+            .document(call_id)
+            .collection("messages")
+        )
+        for doc in msgs_ref.stream():
+            doc.reference.delete()
+        db.collection("calls").document(call_id).delete()
+
+    await asyncio.to_thread(_delete)
+
+
+async def save_call_message(
+    call_id: str,
+    transcript: str,
+    response: str,
+) -> dict:
+    """Save one user↔AI exchange as a message to the call's messages subcollection."""
+    def _save():
+        now = datetime.datetime.utcnow()
+        msg_ref = (
+            db.collection("calls")
+            .document(call_id)
+            .collection("messages")
+            .document()
+        )
+        data = {
+            "transcript": transcript,
+            "response": response,
+            "created_at": now,
+        }
+        msg_ref.set(data)
+        # Bump the call's updated_at
+        db.collection("calls").document(call_id).update({"updated_at": now})
+        return {"id": msg_ref.id, **_serialize(data)}
+
+    return await asyncio.to_thread(_save)
+
+
+async def get_call_messages(call_id: str) -> list[dict]:
+    """Return all messages (exchanges) for a call, ordered by time."""
+    def _get():
+        ref = (
+            db.collection("calls")
+            .document(call_id)
+            .collection("messages")
+            .order_by("created_at")
+        )
+        return [{"id": doc.id, **_serialize(doc.to_dict())} for doc in ref.stream()]
+
+    return await asyncio.to_thread(_get)
+
+
+async def update_call(call_id: str, title: Optional[str] = None, audio_url: Optional[str] = None) -> None:
+    """Update call title or call audio URL."""
+    def _update():
+        data = {"updated_at": datetime.datetime.utcnow()}
+        if title is not None:
+            data["title"] = title
+        if audio_url is not None:
+            data["audio_url"] = audio_url
+        db.collection("calls").document(call_id).update(data)
+
+    await asyncio.to_thread(_update)

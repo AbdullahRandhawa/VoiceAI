@@ -16,26 +16,27 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// ── Conversations ─────────────────────────────────────────────────────────────
-export const getConversations = () => api.get('/conversations/');
+// ── Chats (formerly Conversations) ─────────────────────────────────────────────
+export const getChats = () => api.get('/chats/');
 
-export const createConversation = (title = 'New Chat') =>
-  api.post('/conversations/', { title });
+export const createChat = (title = 'New Chat') =>
+  api.post('/chats/', { title });
 
-export const getMessages = (conversationId) =>
-  api.get(`/conversations/${conversationId}/messages`);
+export const getChatMessages = (chatId) =>
+  api.get(`/chats/${chatId}/messages`);
 
-export const deleteConversation = (conversationId) =>
-  api.delete(`/conversations/${conversationId}`);
+export const deleteChat = (chatId) =>
+  api.delete(`/chats/${chatId}`);
 
 // ── Streaming Chat (SSE via fetch) ────────────────────────────────────────────
 export const streamChat = async (
-  conversationId,
+  chatId,
   message,
   onToken,
   onDone,
   onError,
-  skipUserSave = false
+  skipUserSave = false,
+  onAudioReady = null
 ) => {
   let token = '';
   try {
@@ -54,7 +55,7 @@ export const streamChat = async (
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ 
-        conversation_id: conversationId, 
+        chat_id: chatId, 
         message, 
         skip_user_save: skipUserSave 
       }),
@@ -91,7 +92,16 @@ export const streamChat = async (
       try {
         const data = JSON.parse(line.slice(6));
         if (data.token) onToken(data.token);
-        if (data.done) onDone(data.message_id ?? '', data.audio_url ?? '');
+        if (data.done) {
+          if (data.audio_generating) {
+            onDone(data.message_id ?? '', null, data.audio_generating);
+          } else {
+            onDone(data.message_id ?? '', data.audio_url ?? '', false);
+          }
+        }
+        if (data.audio_ready && onAudioReady) {
+          onAudioReady(data.message_id, data.audio_url);
+        }
       } catch {
         // Malformed SSE line — skip
       }
@@ -100,7 +110,7 @@ export const streamChat = async (
 };
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
-export const transcribeAudio = (audioBlob, conversationId) => {
+export const transcribeAudio = (audioBlob, chatId) => {
   const form = new FormData();
   let ext = 'webm';
   if (audioBlob.type.includes('mp4')) ext = 'm4a';
@@ -109,12 +119,22 @@ export const transcribeAudio = (audioBlob, conversationId) => {
   else if (audioBlob.type.includes('mpeg')) ext = 'mp3';
   
   form.append('audio', audioBlob, `audio.${ext}`);
-  form.append('conversation_id', conversationId);
+  form.append('conversation_id', chatId);
   return api.post('/audio/transcribe', form);
 };
 
 export const generateTTS = (text) =>
   api.post('/audio/tts', { text });
+
+// ── Calls ─────────────────────────────────────────────────────────────────────
+export const getCalls = () => api.get('/calls/');
+
+export const createCall = (title = 'Voice Call') =>
+  api.post('/calls/', { title });
+
+export const deleteCall = (callId) => api.delete(`/calls/${callId}`);
+
+export const getCallMessages = (callId) => api.get(`/calls/${callId}/messages`);
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const syncUser = (userData) =>

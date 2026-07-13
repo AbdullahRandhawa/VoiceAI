@@ -1,20 +1,19 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Play, Pause } from 'lucide-react';
 
-export default function AudioPlaybackPill({ url, autoPlay, variant = 'pill' }) {
+export default function AudioPlaybackPill({ url, variant = 'pill' }) {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
 
-  // Auto-play logic
-  React.useEffect(() => {
-    if (autoPlay && url) {
-      if (!audioRef.current) {
-        audioRef.current = new Audio(url);
-        audioRef.current.onended = () => setPlaying(false);
+  // Stop audio when component unmounts (e.g. user switches chat)
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
       }
-      audioRef.current.play().then(() => setPlaying(true)).catch(() => {});
-    }
-  }, [autoPlay, url]);
+    };
+  }, []);
 
   const toggle = () => {
     if (!audioRef.current) {
@@ -38,7 +37,7 @@ export default function AudioPlaybackPill({ url, autoPlay, variant = 'pill' }) {
           {playing ? <Pause size={14} /> : <Play size={14} />}
         </button>
         <div style={styles.oscillatorBars}>
-          {Array.from({ length: 15 }).map((_, i) => (
+          {Array.from({ length: 30 }).map((_, i) => (
             <span
               key={i}
               style={{
@@ -67,7 +66,6 @@ export default function AudioPlaybackPill({ url, autoPlay, variant = 'pill' }) {
       </span>
       <span style={styles.label}>{playing ? 'Stop' : 'Listen'}</span>
 
-      {/* Animated bars when playing */}
       {playing && (
         <span style={styles.bars}>
           {[0, 1, 2, 3].map((i) => (
@@ -96,18 +94,17 @@ const styles = {
   pill: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 6,
-    padding: '6px 14px',
-    borderRadius: 999,
-    background: 'rgba(255,255,255,0.14)',
-    border: '1px solid rgba(255,255,255,0.2)',
+    gap: 4,
+    padding: '4px 12px',
+    borderRadius: 6,
+    background: 'rgba(255,255,255,0.04)',
+    border: '1px solid rgba(255,255,255,0.08)',
     color: 'inherit',
-    fontSize: '0.8rem',
+    fontSize: '0.75rem',
     fontWeight: 500,
     fontFamily: 'Inter, sans-serif',
     cursor: 'pointer',
-    transition: 'background 0.15s',
-    backdropFilter: 'blur(8px)',
+    transition: 'all 0.2s',
   },
   icon: {
     display: 'flex',

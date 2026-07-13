@@ -77,6 +77,18 @@ export class VoiceRecorder {
     });
   }
 
+  pause() {
+    if (this.mediaRecorder?.state === 'recording') {
+      this.mediaRecorder.pause();
+    }
+  }
+
+  resume() {
+    if (this.mediaRecorder?.state === 'paused') {
+      this.mediaRecorder.resume();
+    }
+  }
+
   cancel() {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       this.mediaRecorder.stop();

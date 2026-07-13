@@ -15,7 +15,7 @@ router = APIRouter()
 @router.post("/transcribe")
 async def transcribe_voice_message(
     audio: UploadFile = File(...),
-    conversation_id: str = Form(...),
+    conversation_id: str = Form(...),  # kept name in Form for client request matching
     user: dict = Depends(get_current_user),
 ):
     """
@@ -32,8 +32,8 @@ async def transcribe_voice_message(
         cloudinary_service.upload_audio(audio_bytes, filename=filename),
     )
 
-    saved = await firestore_service.save_message(
-        conversation_id,
+    saved = await firestore_service.save_chat_message(
+        conversation_id,  # this is the chat_id from frontend
         role="user",
         content=transcript,
         audio_url=upload["url"],
@@ -56,7 +56,6 @@ class TTSRequest(BaseModel):
 async def generate_tts(body: TTSRequest, user: dict = Depends(get_current_user)):
     """
     Converts text → audio, uploads to Cloudinary, returns the URL.
-    Used by the frontend to generate playback audio for assistant messages.
     """
     audio_bytes = await openrouter.text_to_speech(body.text)
     upload = await cloudinary_service.upload_audio(audio_bytes, filename="audio.mp3")

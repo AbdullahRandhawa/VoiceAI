@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mic Diagnostic</title>
+<style>
+  body { background: #0d0d1a; color: #fff; font-family: monospace; padding: 30px; }
+  h2 { color: #25d366; }
+  button { padding: 12px 24px; margin: 8px; border-radius: 8px; border: none; cursor: pointer; font-size: 1rem; }
+  #startBtn { background: #25d366; color: #000; }
+  #stopBtn  { background: #ef4444; color: #fff; }
+  #log { background: #111; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-top: 20px; min-height: 200px; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.7; }
+  #bars { display: flex; gap: 3px; align-items: flex-end; height: 80px; margin: 20px 0; background: #111; padding: 8px; border-radius: 8px; }
+  .bar { width: 10px; background: #25d366; border-radius: 3px; transition: height 0.05s; min-height: 3px; }
+  #levelPct { font-size: 2rem; font-weight: bold; color: #25d366; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h2>🎤 Mic Diagnostic Tool</h2>
+<p>This page tests if your browser can capture mic audio — independent of the VoiceAI app.</p>
+
+<button id="startBtn" onclick="startTest()">▶ Start Mic Test</button>
+<button id="stopBtn"  onclick="stopTest()" disabled>■ Stop</button>
+<button onclick="downloadBlob()" id="dlBtn" disabled>⬇ Download Recorded Audio</button>
+
+<div id="levelPct">0%</div>
+<div id="bars"></div>
+
+<div id="log">Waiting for test to start...\n</div>
+
+<script>
+  let stream, audioCtx, analyser, animFrame, mediaRecorder, chunks = [], recordedBlob;
+  const NUM_BARS = 32;
+  const log = document.getElementById('log');
+  const bars = document.getElementById('bars');
+  const levelEl = document.getElementById('levelPct');
+
+  // Create bars
+  for (let i = 0; i < NUM_BARS; i++) {
+    const b = document.createElement('div');
+    b.className = 'bar';
+    b.style.height = '3px';
+    bars.appendChild(b);
+  }
+  const barEls = bars.querySelectorAll('.bar');
+
+  function addLog(msg, color) {
+    const ts = new Date().toLocaleTimeString();
+    log.innerHTML += `<span style="color:${color||'#ccc'}">[${ts}] ${msg}</span>\n`;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function startTest() {
+    log.innerHTML = '';
+    addLog('Requesting microphone permission...', '#facc15');
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true }
+      });
+      addLog('✅ getUserMedia SUCCESS', '#25d366');
+      addLog(`Tracks: ${stream.getAudioTracks().length}`, '#25d366');
+
+      const track = stream.getAudioTracks()[0];
+      addLog(`Track label: "${track.label}"`, '#a3e635');
+      addLog(`Track enabled: ${track.enabled}`, '#a3e635');
+      addLog(`Track muted: ${track.muted}`, track.muted ? '#ef4444' : '#a3e635');
+      addLog(`Track readyState: ${track.readyState}`, '#a3e635');
+      const settings = track.getSettings();
+      addLog(`Settings: sampleRate=${settings.sampleRate} channels=${settings.channelCount} deviceId=${settings.deviceId?.slice(0,20)}...`, '#a3e635');
+
+      // Web Audio analysis
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      addLog(`AudioContext state: ${audioCtx.state}`, audioCtx.state === 'running' ? '#25d366' : '#ef4444');
+      
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+        addLog(`AudioContext resumed: ${audioCtx.state}`, '#25d366');
+      }
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.7;
+      source.connect(analyser);
+
+      // MediaRecorder
+      chunks = [];
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      addLog(`MediaRecorder mimeType: "${mimeType || '(browser default)'}"`, '#a3e635');
+      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.start(100);
+      addLog('MediaRecorder started', '#25d366');
+
+      // Start visualiser
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      let maxSeen = 0;
+      let frame = 0;
+
+      function tick() {
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((a, b) => a + b, 0) / data.length;
+        const pct = Math.round((avg / 255) * 100);
+        if (avg > maxSeen) maxSeen = avg;
+        levelEl.textContent = `${pct}% (peak: ${Math.round((maxSeen/255)*100)}%)`;
+        levelEl.style.color = pct > 5 ? '#25d366' : pct > 0 ? '#facc15' : '#ef4444';
+
+        const binsPerBar = Math.floor(data.length / NUM_BARS);
+        barEls.forEach((bar, i) => {
+          let sum = 0;
+          for (let j = 0; j < binsPerBar; j++) sum += data[i * binsPerBar + j];
+          const h = Math.max(3, Math.round((sum / binsPerBar / 255) * 70));
+          bar.style.height = h + 'px';
+          bar.style.background = h > 20 ? '#25d366' : h > 8 ? '#facc15' : '#555';
+        });
+
+        // Log every 2 seconds
+        frame++;
+        if (frame % 60 === 0) {
+          addLog(`Level check: avg=${avg.toFixed(1)}/255 (${pct}%) — ${avg < 1 ? '⚠️ SILENT' : '✅ audio detected'}`,
+            avg < 1 ? '#ef4444' : '#25d366');
+        }
+
+        animFrame = requestAnimationFrame(tick);
+      }
+      tick();
+
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = false;
+      addLog('--- Speak into your mic now ---', '#facc15');
+
+    } catch (err) {
+      addLog(`❌ ERROR: ${err.name}: ${err.message}`, '#ef4444');
+      addLog('Possible causes:', '#ef4444');
+      if (err.name === 'NotAllowedError') addLog('  → Browser/OS blocked mic access', '#ef4444');
+      if (err.name === 'NotFoundError') addLog('  → No microphone device found', '#ef4444');
+      if (err.name === 'NotReadableError') addLog('  → Mic is in use by another app', '#ef4444');
+    }
+  }
+
+  function stopTest() {
+    cancelAnimationFrame(animFrame);
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.onstop = () => {
+        recordedBlob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        addLog(`\n✅ Recording stopped. Blob: ${recordedBlob.type}, ${recordedBlob.size} bytes, ${chunks.length} chunks`, '#25d366');
+        if (recordedBlob.size < 1000) {
+          addLog('⚠️ Blob is very small — mic captured near-silence', '#facc15');
+        }
+        document.getElementById('dlBtn').disabled = false;
+      };
+      mediaRecorder.stop();
+    }
+    if (audioCtx) audioCtx.close();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+    barEls.forEach(b => { b.style.height = '3px'; b.style.background = '#555'; });
+    levelEl.textContent = '0%';
+  }
+
+  function downloadBlob() {
+    if (!recordedBlob) return;
+    const url = URL.createObjectURL(recordedBlob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'mic-test.webm'; a.click();
+    URL.revokeObjectURL(url);
+    addLog('Downloaded mic-test.webm — play it to check if your voice was captured', '#a3e635');
+  }
+</script>
+</body>
+</html>

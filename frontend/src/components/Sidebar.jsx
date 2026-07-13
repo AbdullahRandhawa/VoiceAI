@@ -2,22 +2,41 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquarePlus,
+  Phone,
+  PhoneCall,
   Trash2,
   LogOut,
-  Phone,
   MessageSquare,
   Loader2,
 } from 'lucide-react';
 import { logout } from '../services/auth';
 import { useNavigate } from 'react-router-dom';
 
+/** Format a date string as "20:56  Thu · Jun" */
+function formatTimestamp(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const day = d.toLocaleDateString('en-US', { weekday: 'short' }); // Thu
+    const mon = d.toLocaleDateString('en-US', { month: 'short' });   // Jun
+    return `${hh}:${mm}  ${day} · ${mon}`;
+  } catch {
+    return '';
+  }
+}
+
 export default function Sidebar({
   conversations,
+  calls,
   activeId,
   loading,
   onSelect,
   onNew,
+  onNewCall,
   onDelete,
+  onDeleteCall,
   user,
 }) {
   const navigate = useNavigate();
@@ -28,15 +47,28 @@ export default function Sidebar({
     navigate('/login');
   };
 
-  const handleDelete = async (e, id) => {
+  const handleDelete = async (e, id, isCall) => {
     e.stopPropagation();
     setDeletingId(id);
     try {
-      await onDelete(id);
+      if (isCall) {
+        await onDeleteCall(id);
+      } else {
+        await onDelete(id);
+      }
     } finally {
       setDeletingId(null);
     }
   };
+
+  // Merge conversations and calls into one list sorted by updated_at desc
+  const chatItems = (conversations || []).map(c => ({ ...c, _type: 'chat' }));
+  const callItems = (calls || []).map(c => ({ ...c, _type: 'call' }));
+  const allItems = [...chatItems, ...callItems].sort((a, b) => {
+    const ta = a.updated_at || a.created_at || '';
+    const tb = b.updated_at || b.created_at || '';
+    return tb.localeCompare(ta);
+  });
 
   return (
     <aside style={styles.sidebar}>
@@ -46,15 +78,23 @@ export default function Sidebar({
           <div style={styles.logoIcon}>✦</div>
           <span className="gradient-text" style={styles.logoText}>VoiceAI</span>
         </div>
+
+        {/* New Chat button */}
         <button className="btn btn-primary" style={styles.newBtn} onClick={onNew}>
           <MessageSquarePlus size={15} />
           New Chat
         </button>
+
+        {/* New Call button */}
+        <button style={styles.newCallBtn} onClick={onNewCall}>
+          <PhoneCall size={15} />
+          New Call
+        </button>
       </div>
 
-      {/* Conversations list */}
+      {/* Merged history list */}
       <div style={styles.listWrap}>
-        <p style={styles.sectionLabel}>Conversations</p>
+        <p style={styles.sectionLabel}>History</p>
         <div style={styles.list}>
           <AnimatePresence>
             {loading ? (
@@ -65,51 +105,71 @@ export default function Sidebar({
                 style={styles.loadingWrap}
               >
                 <Loader2 size={24} style={{ animation: 'spin 1s linear infinite' }} />
-                <span>Loading chats...</span>
+                <span>Loading...</span>
               </motion.div>
-            ) : conversations.length === 0 ? (
+            ) : allItems.length === 0 ? (
               <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 style={styles.emptyMsg}
               >
-                No conversations yet.
-                <br />Start chatting!
+                No history yet.
+                <br />Start chatting or call!
               </motion.p>
             ) : (
-              conversations.map((conv) => (
-                <motion.div
-                  key={conv.id}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -8 }}
-                className="conv-item"
-                style={{
-                  ...styles.convItem,
-                  ...(activeId === conv.id ? styles.convItemActive : {}),
-                }}
-                onClick={() => onSelect(conv.id)}
-              >
-                <MessageSquare size={14} style={{ flexShrink: 0, opacity: 0.6 }} />
-                <span style={styles.convTitle}>{conv.title || 'New Chat'}</span>
-                <button
-                  className="conv-delete-btn"
-                  style={styles.deleteBtn}
-                  onClick={(e) => handleDelete(e, conv.id)}
-                  title="Delete conversation"
-                  disabled={deletingId === conv.id}
-                >
-                  {deletingId === conv.id ? (
-                    <Loader2
-                      size={13}
-                      style={{ animation: 'spin 1s linear infinite' }}
-                    />
-                  ) : (
-                    <Trash2 size={13} />
-                  )}
-                </button>
-              </motion.div>
-              ))
+              allItems.map((item) => {
+                const isCall = item._type === 'call';
+                const isActive = activeId === item.id;
+                const isDeleting = deletingId === item.id;
+                return (
+                  <motion.div
+                    key={item.id}
+                    initial={{ opacity: 0, x: -8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -8 }}
+                    className="conv-item"
+                    style={{
+                      ...styles.convItem,
+                      ...(isActive ? styles.convItemActive : {}),
+                      ...(isCall ? styles.convItemCall : {}),
+                      ...(isActive && isCall ? styles.convItemCallActive : {}),
+                    }}
+                    onClick={() => onSelect(item.id, isCall)}
+                  >
+                    {isCall
+                      ? <Phone size={13} style={{ flexShrink: 0, opacity: 0.75, color: '#a78bfa' }} />
+                      : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.6 }} />
+                    }
+
+                    <div style={styles.itemInfo}>
+                      <span style={styles.convTitle}>
+                        {item.title || (isCall ? 'Voice Call' : 'New Chat')}
+                      </span>
+                      <span style={styles.timestamp}>
+                        {formatTimestamp(item.updated_at || item.created_at)}
+                      </span>
+                    </div>
+
+                    {/* Delete button — always visible while deleting */}
+                    <button
+                      className="conv-delete-btn"
+                      style={{
+                        ...styles.deleteBtn,
+                        ...(isDeleting ? styles.deleteBtnVisible : {}),
+                      }}
+                      onClick={(e) => handleDelete(e, item.id, isCall)}
+                      title="Delete"
+                      disabled={isDeleting}
+                    >
+                      {isDeleting ? (
+                        <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                      ) : (
+                        <Trash2 size={12} />
+                      )}
+                    </button>
+                  </motion.div>
+                );
+              })
             )}
           </AnimatePresence>
         </div>
@@ -153,13 +213,14 @@ const styles = {
     padding: '20px 16px 16px',
     display: 'flex',
     flexDirection: 'column',
-    gap: 14,
+    gap: 10,
     borderBottom: '1px solid var(--border)',
   },
   logo: {
     display: 'flex',
     alignItems: 'center',
     gap: 10,
+    marginBottom: 4,
   },
   logoIcon: {
     width: 32,
@@ -181,31 +242,22 @@ const styles = {
     fontSize: '0.85rem',
     width: '100%',
   },
-  voiceCallBtn: {
-    margin: '12px 16px',
-    padding: '10px 14px',
-    borderRadius: 'var(--radius-md)',
-    background: 'var(--gradient-brand-subtle)',
-    border: '1px solid var(--border-accent)',
-    color: 'var(--accent-primary)',
+  newCallBtn: {
+    height: 36,
+    width: '100%',
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
-    fontSize: '0.85rem',
+    fontSize: '0.83rem',
     fontWeight: 500,
     fontFamily: 'Inter, sans-serif',
+    borderRadius: 'var(--radius-md)',
+    border: '1px solid rgba(139,92,246,0.4)',
+    background: 'rgba(139,92,246,0.1)',
+    color: '#a78bfa',
     cursor: 'pointer',
     transition: 'all 0.2s',
-  },
-  liveTag: {
-    marginLeft: 'auto',
-    fontSize: '0.65rem',
-    fontWeight: 700,
-    padding: '2px 7px',
-    borderRadius: 999,
-    background: 'rgba(37,211,102,0.3)',
-    color: '#25d366',
-    letterSpacing: '0.08em',
   },
   listWrap: {
     flex: 1,
@@ -251,12 +303,12 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '9px 12px',
+    padding: '8px 10px',
     borderRadius: 'var(--radius-md)',
     cursor: 'pointer',
     transition: 'background 0.15s',
     color: 'var(--text-secondary)',
-    fontSize: '0.855rem',
+    fontSize: '0.845rem',
     minWidth: 0,
     position: 'relative',
   },
@@ -265,11 +317,30 @@ const styles = {
     color: 'var(--text-primary)',
     border: '1px solid var(--border-accent)',
   },
-  convTitle: {
+  convItemCall: {
+    // subtle purple tint for call items
+  },
+  convItemCallActive: {
+    border: '1px solid rgba(139,92,246,0.4)',
+    background: 'rgba(139,92,246,0.08)',
+  },
+  itemInfo: {
     flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  convTitle: {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+    lineHeight: 1.3,
+  },
+  timestamp: {
+    fontSize: '0.68rem',
+    color: 'var(--text-muted)',
+    letterSpacing: '0.02em',
   },
   deleteBtn: {
     flexShrink: 0,
@@ -283,6 +354,9 @@ const styles = {
     alignItems: 'center',
     opacity: 0,
     transition: 'opacity 0.15s, color 0.15s',
+  },
+  deleteBtnVisible: {
+    opacity: 1,
   },
   footer: {
     padding: '14px 16px',
