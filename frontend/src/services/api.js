@@ -54,10 +54,10 @@ export const streamChat = async (
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ 
-        chat_id: chatId, 
-        message, 
-        skip_user_save: skipUserSave 
+      body: JSON.stringify({
+        chat_id: chatId,
+        message,
+        skip_user_save: skipUserSave
       }),
     });
   } catch {
@@ -78,6 +78,12 @@ export const streamChat = async (
 
   const decoder = new TextDecoder();
   let buffer = '';
+  let audioReadyReceived = false;
+  let audioTimeoutId = null;
+  let pendingDoneMsgId = null;
+
+  // Safety net: if audio_ready doesn't arrive within 30s, clear the pill
+  const AUDIO_TIMEOUT_MS = 30_000;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -94,19 +100,36 @@ export const streamChat = async (
         if (data.token) onToken(data.token);
         if (data.done) {
           if (data.audio_generating) {
-            onDone(data.message_id ?? '', null, data.audio_generating);
+            pendingDoneMsgId = data.message_id ?? '';
+            onDone(pendingDoneMsgId, null, true);
+            // Start a timeout — dismiss the pill if audio_ready never comes
+            audioTimeoutId = setTimeout(() => {
+              if (!audioReadyReceived && onAudioReady) {
+                onAudioReady(pendingDoneMsgId, null);
+              }
+            }, AUDIO_TIMEOUT_MS);
           } else {
             onDone(data.message_id ?? '', data.audio_url ?? '', false);
           }
         }
         if (data.audio_ready && onAudioReady) {
+          audioReadyReceived = true;
+          if (audioTimeoutId) {
+            clearTimeout(audioTimeoutId);
+            audioTimeoutId = null;
+          }
           onAudioReady(data.message_id, data.audio_url);
         }
       } catch {
         // Malformed SSE line — skip
       }
     }
+
+    // Exit early once audio is received; no more events expected
+    if (audioReadyReceived) break;
   }
+
+  if (audioTimeoutId) clearTimeout(audioTimeoutId);
 };
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
@@ -117,7 +140,7 @@ export const transcribeAudio = (audioBlob, chatId) => {
   else if (audioBlob.type.includes('ogg')) ext = 'ogg';
   else if (audioBlob.type.includes('wav')) ext = 'wav';
   else if (audioBlob.type.includes('mpeg')) ext = 'mp3';
-  
+
   form.append('audio', audioBlob, `audio.${ext}`);
   form.append('conversation_id', chatId);
   return api.post('/audio/transcribe', form);
@@ -131,6 +154,8 @@ export const getCalls = () => api.get('/calls/');
 
 export const createCall = (title = 'Voice Call') =>
   api.post('/calls/', { title });
+
+export const getCall = (callId) => api.get(`/calls/${callId}`);
 
 export const deleteCall = (callId) => api.delete(`/calls/${callId}`);
 

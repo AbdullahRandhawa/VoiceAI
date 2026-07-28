@@ -25,10 +25,9 @@ async def upload_audio(audio_bytes: bytes, filename: str = "audio.mp3", public_i
         result = cloudinary.uploader.upload(
             io.BytesIO(audio_bytes),
             resource_type="video",
-            folder="ai-voice-assistant",
+            # NOTE: do NOT pass folder= here — public_id already contains the path
             public_id=pid,
             overwrite=True,
-            filename=filename,
         )
         return {
             "url": result["secure_url"],

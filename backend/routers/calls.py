@@ -4,6 +4,7 @@ Calls router — REST API for the voice call history.
 Endpoints:
   POST   /calls/                  → create a new call record
   GET    /calls/                  → list all calls for the current user
+  GET    /calls/{call_id}         → get a single call document (incl. audio_url)
   DELETE /calls/{call_id}         → delete a call and all its exchanges
   GET    /calls/{call_id}/messages → list all messages (exchanges) for a call
 """
@@ -39,6 +40,14 @@ async def create_call(body: CreateCallBody, uid: str = Depends(_get_uid)):
 async def list_calls(uid: str = Depends(_get_uid)):
     calls = await firestore_service.get_calls(uid)
     return {"calls": calls}
+
+
+@router.get("/{call_id}")
+async def get_call(call_id: str, uid: str = Depends(_get_uid)):
+    call = await firestore_service.get_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return call
 
 
 @router.delete("/{call_id}")

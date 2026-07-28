@@ -186,6 +186,17 @@ async def create_call(user_id: str, title: str = "Voice Call") -> dict:
     return await asyncio.to_thread(_create)
 
 
+async def get_call(call_id: str) -> Optional[dict]:
+    """Return a single call document by ID, or None if it doesn't exist."""
+    def _get():
+        doc = db.collection("calls").document(call_id).get()
+        if not doc.exists:
+            return None
+        return {"id": doc.id, **_serialize(doc.to_dict())}
+
+    return await asyncio.to_thread(_get)
+
+
 async def get_calls(user_id: str) -> list[dict]:
     def _get():
         ref = db.collection("calls").where("user_id", "==", user_id)

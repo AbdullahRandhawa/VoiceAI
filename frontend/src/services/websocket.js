@@ -3,14 +3,11 @@
  *
  * Protocol:
  *   Client → binary  : full recorded audio blob
- *   Server → JSON    : {type:"transcript"|"token"|"done"|"error", text?, message?}
+ *   Server → JSON    : {type:"transcript"|"token"|"done"|"error"|"title", text?, message?}
  *   Server → binary  : MP3 audio chunk (one per TTS sentence)
- *
- * onAllAudioDone fires after the "done" message AND the entire audio queue
- * has finished playing — so auto-listen never starts mid-speech.
  */
 import { getIdToken } from './auth';
-import { playChunkBytes } from './audio';
+import { AudioPlayer } from './audio';
 
 const WS_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000')
   .replace(/^http/, 'ws');
@@ -19,8 +16,12 @@ export class VoiceCallService {
   ws = null;
   audioQueue = [];
   isPlaying = false;
-  _donePending = false;      // "done" JSON arrived but audio still queued
+  isPaused = false;
+  _donePending = false;
   _callbacks = {};
+  _audioStartedFired = false;  // Track if onAudioStarted was fired for this exchange
+  _playGuardTimeout = null;    // Safety: reset isPlaying if stuck
+  player = new AudioPlayer();
 
   async connect(conversationId, callbacks) {
     this._callbacks = callbacks || {};
@@ -33,16 +34,17 @@ export class VoiceCallService {
     }
 
     let url = `${WS_URL}/ws/voice-call?token=${token}`;
-    if (conversationId) {
-      url += `&call_id=${conversationId}`;
-    }
+    if (conversationId) url += `&call_id=${conversationId}`;
+
     this.ws = new WebSocket(url);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onmessage = async (event) => {
       if (event.data instanceof ArrayBuffer) {
         this.audioQueue.push(event.data);
-        this._drainQueue();
+        if (!this.isPaused) {
+          this._drainQueue();
+        }
         return;
       }
 
@@ -50,13 +52,20 @@ export class VoiceCallService {
         const data = JSON.parse(event.data);
         switch (data.type) {
           case 'transcript':
+            // Reset audio-started flag for the new exchange
+            this._audioStartedFired = false;
             callbacks?.onTranscript(data.text ?? '');
             break;
           case 'token':
             callbacks?.onToken(data.text ?? '');
             break;
+          case 'title':
+            callbacks?.onTitle?.(data.text ?? '');
+            break;
+          case 'created':
+            callbacks?.onCreated?.(data.call_id, data.title ?? '');
+            break;
           case 'done':
-            // Mark done; fire onAllAudioDone only after queue drains
             this._donePending = true;
             if (!this.isPlaying && this.audioQueue.length === 0) {
               this._fireDone();
@@ -70,6 +79,17 @@ export class VoiceCallService {
         }
       } catch {
         // ignore malformed messages
+      }
+    };
+
+    this.ws.onclose = (event) => {
+      if (event.code !== 1000 && event.code !== 1005) {
+        if (this._donePending || this.isPlaying) {
+          this._donePending = false;
+          this.isPlaying = false;
+          this.audioQueue = [];
+        }
+        callbacks?.onError('Connection lost. Please retry.');
       }
     };
 
@@ -88,23 +108,76 @@ export class VoiceCallService {
   }
 
   _drainQueue() {
-    if (this.isPlaying || this.audioQueue.length === 0) return;
+    if (this.isPaused || this.isPlaying || this.audioQueue.length === 0) return;
+
     this.isPlaying = true;
-    const chunk = this.audioQueue.shift();
-    const audio = playChunkBytes(chunk);
-    audio.onended = () => {
-      this.isPlaying = false;
-      if (this.audioQueue.length > 0) {
+
+    // Safety net: if isPlaying stays true for >30s something went wrong — reset
+    if (this._playGuardTimeout) clearTimeout(this._playGuardTimeout);
+    this._playGuardTimeout = setTimeout(() => {
+      if (this.isPlaying) {
+        console.warn('[VoiceCallService] isPlaying stuck — force resetting');
+        this.isPlaying = false;
         this._drainQueue();
-      } else if (this._donePending) {
-        // All audio played AND server sent done → notify
-        this._fireDone();
       }
-    };
-    audio.onerror = () => {
-      this.isPlaying = false;
+    }, 30_000);
+
+    const chunk = this.audioQueue.shift();
+
+    // Fire onAudioStarted once per exchange so page can transition to SPEAKING
+    if (!this._audioStartedFired) {
+      this._audioStartedFired = true;
+      this._callbacks?.onAudioStarted?.();
+    }
+
+    this.player.playChunk(
+      chunk,
+      () => {
+        // onEnded
+        if (this._playGuardTimeout) { clearTimeout(this._playGuardTimeout); this._playGuardTimeout = null; }
+        this.isPlaying = false;
+        if (!this.isPaused && this.audioQueue.length > 0) {
+          this._drainQueue();
+        } else if (this._donePending && this.audioQueue.length === 0) {
+          this._fireDone();
+        }
+      },
+      () => {
+        // onError
+        if (this._playGuardTimeout) { clearTimeout(this._playGuardTimeout); this._playGuardTimeout = null; }
+        this.isPlaying = false;
+        if (!this.isPaused) {
+          this._drainQueue();
+        }
+      }
+    );
+  }
+
+  pausePlayback() {
+    this.isPaused = true;
+    this.player.pause();
+  }
+
+  resumePlayback() {
+    this.isPaused = false;
+    if (this.isPlaying) {
+      this.player.resume();
+    } else if (this.audioQueue.length > 0) {
       this._drainQueue();
-    };
+    }
+  }
+
+  stopPlayback() {
+    this.isPaused = false;
+    this.isPlaying = false;
+    this.audioQueue = [];
+    this._donePending = false;
+    if (this._playGuardTimeout) { clearTimeout(this._playGuardTimeout); this._playGuardTimeout = null; }
+    this.player.stop();
+  }
+
+  getPlaybackRMS() {
+    return this.player.getRMS();
   }
 
   sendAudio(blob) {
@@ -114,15 +187,14 @@ export class VoiceCallService {
   }
 
   disconnect() {
+    this.stopPlayback();
     if (this.ws) {
       this.ws.onmessage = null;
       this.ws.onerror = null;
-      this.ws.close();
+      this.ws.onclose = null;
+      this.ws.close(1000);
     }
     this.ws = null;
-    this.audioQueue = [];
-    this.isPlaying = false;
-    this._donePending = false;
     this._callbacks = {};
   }
 

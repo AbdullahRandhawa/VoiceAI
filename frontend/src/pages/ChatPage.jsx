@@ -5,7 +5,7 @@ import React, {
   useState,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Sparkles, MessageSquarePlus, Loader2, Phone, PhoneOff, Play, Pause } from 'lucide-react';
+import { Send, Sparkles, MessageSquarePlus, Loader2, Phone, PhoneOff, Play, Pause, MessageSquare } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
   createChat,
@@ -17,6 +17,7 @@ import {
   getCalls,
   deleteCall,
   getCallMessages,
+  getCall,
 } from '../services/api';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
@@ -49,6 +50,7 @@ export default function ChatPage() {
 
   // Audio Playback states for Calls
   const callAudioRef = useRef(null);
+  const [callAudioUrl, setCallAudioUrl] = useState(null); // fetched fresh per-call to include recording url
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
@@ -87,6 +89,11 @@ export default function ChatPage() {
 
   // ── Select chat or call ───────────────────────────────────────────────
   const selectItem = useCallback(async (id, isCallItem) => {
+    // If leaving an empty draft, remove it silently
+    if (activeId === 'new_chat_draft' && messages.length === 0) {
+      setConversations(prev => prev.filter(c => c.id !== 'new_chat_draft'));
+    }
+
     // Stop any playing audio before switching
     if (callAudioRef.current) {
       callAudioRef.current.pause();
@@ -98,26 +105,22 @@ export default function ChatPage() {
     setAudioPlaying(false);
     setAudioCurrentTime(0);
     setAudioDuration(0);
-    
+    setCallAudioUrl(null);
+
     if (isCallItem) {
       try {
         const res = await getCallMessages(id);
         const mapped = [];
         (res.data.messages || []).forEach(msg => {
-          mapped.push({
-            id: `${msg.id}-u`,
-            role: 'user',
-            content: msg.transcript,
-            created_at: msg.created_at
-          });
-          mapped.push({
-            id: `${msg.id}-a`,
-            role: 'assistant',
-            content: msg.response,
-            created_at: msg.created_at
-          });
+          mapped.push({ id: `${msg.id}-u`, role: 'user', content: msg.transcript, created_at: msg.created_at });
+          mapped.push({ id: `${msg.id}-a`, role: 'assistant', content: msg.response, created_at: msg.created_at });
         });
         setMessages(mapped);
+
+        try {
+          const callRes = await getCall(id);
+          setCallAudioUrl(callRes.data?.audio_url || null);
+        } catch { /* audio_url optional */ }
       } catch {
         setMessages([]);
       }
@@ -129,7 +132,7 @@ export default function ChatPage() {
         setMessages([]);
       }
     }
-  }, []);
+  }, [activeId, messages.length]);
 
   // Handle direct navigation selection (passed via router state, e.g. from VoiceCallPage sidebar click)
   useEffect(() => {
@@ -137,10 +140,10 @@ export default function ChatPage() {
       if (location.state?.activeId) {
         const selectedId = location.state.activeId;
         // First load all if they aren't loaded yet to ensure calls/conversations are populated
-        const currentData = (conversations.length === 0 && calls.length === 0) 
+        const currentData = (conversations.length === 0 && calls.length === 0)
           ? await loadAll()
           : { conversations, calls };
-        
+
         const isCallItem = currentData.calls.some(c => c.id === selectedId);
         selectItem(selectedId, isCallItem);
         // Clear the state so it doesn't re-select on every navigation refresh
@@ -150,18 +153,22 @@ export default function ChatPage() {
     checkStateSelection();
   }, [location.state, conversations, calls, loadAll, selectItem, navigate, location.pathname]);
 
-  // ── New Chat ──────────────────────────────────────────────────────────────
-  const handleNew = async () => {
-    if (activeId && messages.length === 0) return;
-    try {
-      const res = await createChat();
-      const chatDoc = res.data;
-      setConversations((prev) => [chatDoc, ...prev]);
-      setActiveId(chatDoc.id);
-      setMessages([]);
-    } catch {
-      alert('Failed to create chat.');
-    }
+  // ── New Chat — frontend-only draft (no backend until first message) ───────────
+  const DRAFT_ID = 'new_chat_draft';
+
+  const handleNew = () => {
+    // Don't create a second draft if one already exists
+    if (activeId === DRAFT_ID) return;
+    // Remove any pre-existing empty draft before adding a fresh one
+    setConversations(prev => prev.filter(c => c.id !== DRAFT_ID));
+    setConversations(prev => [
+      { id: DRAFT_ID, title: 'New Chat', _isDraft: true, created_at: new Date().toISOString() },
+      ...prev,
+    ]);
+    setActiveId(DRAFT_ID);
+    setMessages([]);
+    setStreamText('');
+    setStreamPhase('idle');
   };
 
   // ── New Call — navigate to voice call page ────────────────────────────────
@@ -198,15 +205,35 @@ export default function ChatPage() {
 
   // ── Send (text or voice) ──────────────────────────────────────────────────
   const handleSend = async () => {
-    // If voice recorder is active, send the recording instead
     if (voiceRecorderRef.current?.isRecording()) {
       await voiceRecorderRef.current.sendRecording();
       return;
     }
     const text = input.trim();
-    if (!text || !activeId || streaming || isCall) return;
+    if (!text || streaming || isCall) return;
+
+    // — Draft chat: create real chat in Firestore on first message —
+    let chatId = activeId;
+    if (activeId === 'new_chat_draft') {
+      try {
+        const res = await createChat();
+        const chatDoc = res.data;
+        chatId = chatDoc.id;
+        setConversations(prev => [
+          chatDoc,
+          ...prev.filter(c => c.id !== 'new_chat_draft'),
+        ]);
+        setActiveId(chatId);
+      } catch {
+        alert('Failed to create chat.');
+        return;
+      }
+    }
+
+    if (!chatId) return;
 
     setInput('');
+    if (inputRef.current) inputRef.current.style.height = 'auto';
     setStreaming(true);
     setStreamText('');
     setStreamPhase('thinking');
@@ -217,49 +244,47 @@ export default function ChatPage() {
       content: text,
       created_at: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, tempUserMsg]);
+    setMessages(prev => [...prev, tempUserMsg]);
 
     let finalText = '';
 
-      await streamChat(
-        activeId,
-        text,
-        (token) => {
-          finalText += token;
-          setStreamText(finalText);
-          setStreamPhase('streaming');
-        },
-        async (msgId, audioUrl, audioGenerating) => {
-          const assistantMsg = {
-            id: msgId,
-            role: 'assistant',
-            content: finalText,
-            audio_url: audioUrl || null,
-            audio_generating: audioGenerating || false,
-            created_at: new Date().toISOString(),
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-          setStreaming(false);
-          setStreamText('');
-          setStreamPhase('idle');
-        },
-        (err) => {
-          setStreaming(false);
-          setStreamText('');
-          setStreamPhase('idle');
-          console.error('Stream error:', err);
-        },
-        false,
-        (msgId, audioUrl) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === msgId
-                ? { ...m, audio_url: audioUrl, audio_generating: false }
-                : m
-            )
-          );
-        }
-      );
+    await streamChat(
+      chatId,
+      text,
+      (token) => {
+        finalText += token;
+        setStreamText(finalText);
+        setStreamPhase('streaming');
+      },
+      async (msgId, audioUrl, audioGenerating) => {
+        const assistantMsg = {
+          id: msgId,
+          role: 'assistant',
+          content: finalText,
+          audio_url: audioUrl || null,
+          audio_generating: audioGenerating || false,
+          created_at: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        setStreaming(false);
+        setStreamText('');
+        setStreamPhase('idle');
+      },
+      (err) => {
+        setStreaming(false);
+        setStreamText('');
+        setStreamPhase('idle');
+        console.error('Stream error:', err);
+      },
+      false,
+      (msgId, audioUrl) => {
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === msgId ? { ...m, audio_url: audioUrl, audio_generating: false } : m
+          )
+        );
+      }
+    );
   };
 
   // ── Voice message (only for chats) ─────────────────────────────────────────
@@ -380,10 +405,10 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   };
 
+  // Only show the pill during 'thinking' (before text arrives).
+  // Once tokens are streaming in, hide it — the blinking cursor is enough.
   const statusPill = streamPhase === 'thinking'
     ? { text: 'Thinking…', icon: <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> }
-    : streamPhase === 'streaming'
-    ? { text: 'Generating…', icon: <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> }
     : null;
 
   return (
@@ -450,13 +475,12 @@ export default function ChatPage() {
             {/* Input bar */}
             <div style={styles.inputBar}>
               {isCall ? (
-                /* Custom Audio playback bar instead of input field */
                 <div style={styles.audioPlaybackBar}>
-                  {activeCall?.audio_url ? (
+                  {callAudioUrl ? (
                     <>
                       <audio
                         ref={callAudioRef}
-                        src={activeCall.audio_url}
+                        src={callAudioUrl}
                         onPlay={() => setAudioPlaying(true)}
                         onPause={() => setAudioPlaying(false)}
                         onEnded={() => setAudioPlaying(false)}
@@ -475,7 +499,7 @@ export default function ChatPage() {
                       >
                         {audioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
                       </button>
-                      
+
                       <div style={styles.audioTrackInfo}>
                         <span style={styles.audioTrackTitle}>Voice Call Recording</span>
                         <span style={styles.audioTrackTime}>
@@ -503,82 +527,105 @@ export default function ChatPage() {
                   )}
                 </div>
               ) : (
-                <>
-                  <div className="input-bar-wrap" style={styles.inputPillWrap}>
-                    <div style={styles.inputWrap}>
-                      <textarea
-                        ref={inputRef}
-                        value={input}
-                        onChange={handleInputChange}
-                        onKeyDown={handleKeyDown}
-                        placeholder="Type your message here…"
-                        rows={1}
+                <div className="input-bar-wrap" style={styles.inputPillWrap}>
+                  <div style={styles.inputWrap}>
+                    <textarea
+                      ref={inputRef}
+                      value={input}
+                      onChange={handleInputChange}
+                      onKeyDown={handleKeyDown}
+                      placeholder="Type your message here…"
+                      rows={1}
+                      disabled={streaming}
+                      style={styles.textarea}
+                    />
+
+                    <div style={styles.inputActions}>
+                      <VoiceRecorderBtn
+                        ref={voiceRecorderRef}
+                        onRecordingComplete={handleVoiceRecording}
                         disabled={streaming}
-                        style={styles.textarea}
                       />
 
-                      <div style={styles.inputActions}>
-                        <VoiceRecorderBtn
-                          ref={voiceRecorderRef}
-                          onRecordingComplete={handleVoiceRecording}
-                          disabled={streaming}
-                        />
-
-                        <motion.button
-                          whileTap={{ scale: 0.9 }}
-                          onClick={handleSend}
-                          disabled={(!input.trim() && !voiceRecorderRef.current?.isRecording()) || streaming}
-                          className="btn btn-primary"
-                          style={styles.sendBtn}
-                          id="send-message-btn"
-                        >
-                          <Send size={20} />
-                        </motion.button>
-                      </div>
+                      <motion.button
+                        whileTap={{ scale: 0.9 }}
+                        onClick={handleSend}
+                        disabled={(!input.trim() && !voiceRecorderRef.current?.isRecording()) || streaming}
+                        className="btn btn-primary"
+                        style={styles.sendBtn}
+                        id="send-message-btn"
+                      >
+                        <Send size={20} />
+                      </motion.button>
                     </div>
                   </div>
-                </>
+                </div>
               )}
             </div>
           </>
         ) : (
           <div style={styles.emptyState}>
             <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4 }}
               style={styles.emptyContent}
             >
-              <div style={styles.emptyIcon}>
-                <Sparkles size={32} color="#25d366" />
+              <div style={styles.emptyIconWrap}>
+                <img
+                  src="/Gemini_Generated_Image_dsk7okdsk7okdsk7.png"
+                  alt="VoiceAI Logo"
+                  style={styles.emptyLogoImg}
+                />
               </div>
+
               <h2 style={styles.emptyTitle}>
-                Start a <span className="gradient-text">conversation</span>
+                Welcome to <span className="gradient-text">VoiceAI</span>
               </h2>
+
               <p style={styles.emptySubtitle}>
-                Click "New Chat" to start chatting, or "New Call" for a real-time voice conversation.
+                Your multi-modal AI platform. Chat via text, send instant voice notes, or launch hands-free real-time voice calls.
               </p>
-              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+
+              <div style={styles.featureGrid}>
+                <div style={styles.featureCard}>
+                  <div style={styles.featureHeader}>
+                    <MessageSquare size={20} color="#25d366" />
+                    <span style={styles.featureTitle}>AI Chat & Voice Messaging</span>
+                  </div>
+                  <p style={styles.featureDesc}>
+                    General purpose chatbot for Q&A, writing code, analyzing documents, and voice-to-text messaging with live audio response generation.
+                  </p>
+                </div>
+
+                <div style={styles.featureCard}>
+                  <div style={styles.featureHeader}>
+                    <Phone size={20} color="#a78bfa" />
+                    <span style={styles.featureTitle}>Real-Time Voice Call Agent</span>
+                  </div>
+                  <p style={styles.featureDesc}>
+                    Call the AI in real time for hands-free spoken conversations with instant audio responses, silence detection, and stored call logs.
+                  </p>
+                </div>
+              </div>
+
+              <div style={styles.actionRow}>
                 <button
                   className="btn btn-primary"
-                  style={{ padding: '12px 28px' }}
+                  style={styles.heroChatBtn}
                   onClick={handleNew}
+                  id="empty-state-new-chat-btn"
                 >
-                  <MessageSquarePlus size={16} />
+                  <MessageSquarePlus size={18} />
                   New Chat
                 </button>
                 <button
-                  className="btn btn-secondary"
-                  style={{
-                    padding: '12px 28px',
-                    background: 'rgba(139,92,246,0.1)',
-                    border: '1px solid rgba(139,92,246,0.3)',
-                    color: '#a78bfa'
-                  }}
+                  style={styles.heroCallBtn}
                   onClick={handleNewCall}
+                  id="empty-state-new-call-btn"
                 >
-                  <Phone size={16} />
-                  New Call
+                  <Phone size={18} />
+                  New Voice Call
                 </button>
               </div>
             </motion.div>
@@ -605,7 +652,7 @@ const styles = {
   messagesArea: {
     flex: 1,
     overflowY: 'auto',
-    padding: '24px 28px',
+    padding: '24px 48px',
     display: 'flex',
     flexDirection: 'column',
     gap: 4,
@@ -653,7 +700,6 @@ const styles = {
   },
   inputBar: {
     padding: '10px 24px 20px',
-    borderTop: '1px solid var(--border)',
     background: 'rgba(7,7,15,0.8)',
     backdropFilter: 'blur(20px)',
   },
@@ -729,8 +775,8 @@ const styles = {
     gap: 10,
     background: 'var(--bg-glass)',
     border: '1px solid var(--border)',
-    borderRadius: 999,
-    padding: '4px 4px 4px 18px',
+    borderRadius: 16,
+    padding: '8px 8px 8px 18px',
     backdropFilter: 'blur(12px)',
     transition: 'border-color 0.2s',
   },
@@ -777,34 +823,112 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    padding: '32px 24px',
+    overflowY: 'auto',
   },
   emptyContent: {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: 16,
     textAlign: 'center',
-    maxWidth: 420,
-    padding: 24,
+    maxWidth: 620,
+    width: '100%',
   },
-  emptyIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 20,
-    background: 'var(--gradient-brand-subtle)',
+  emptyIconWrap: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    background: 'var(--bg-glass-strong)',
     border: '1px solid var(--border-accent)',
+    padding: 12,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    boxShadow: '0 8px 32px rgba(37, 211, 102, 0.2), 0 0 24px rgba(139, 92, 246, 0.18)',
+    marginBottom: 20,
+  },
+  emptyLogoImg: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 16,
+    objectFit: 'cover',
   },
   emptyTitle: {
-    fontSize: '1.8rem',
+    fontSize: '2.1rem',
     fontWeight: 700,
     letterSpacing: '-0.03em',
+    marginBottom: 10,
+    color: 'var(--text-primary)',
   },
   emptySubtitle: {
-    fontSize: '0.9rem',
+    fontSize: '0.96rem',
     color: 'var(--text-secondary)',
-    lineHeight: 1.7,
+    lineHeight: 1.6,
+    maxWidth: 520,
+    marginBottom: 28,
+  },
+  featureGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+    gap: 16,
+    width: '100%',
+    marginBottom: 32,
+  },
+  featureCard: {
+    background: 'rgba(255, 255, 255, 0.03)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    padding: '20px 22px',
+    textAlign: 'left',
+    backdropFilter: 'blur(10px)',
+  },
+  featureHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  featureTitle: {
+    fontSize: '0.95rem',
+    fontWeight: 600,
+    color: 'var(--text-primary)',
+  },
+  featureDesc: {
+    fontSize: '0.84rem',
+    color: 'var(--text-muted)',
+    lineHeight: 1.55,
+    margin: 0,
+  },
+  actionRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  heroChatBtn: {
+    padding: '13px 28px',
+    fontSize: '0.92rem',
+    borderRadius: 14,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 10,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  heroCallBtn: {
+    padding: '13px 28px',
+    fontSize: '0.92rem',
+    borderRadius: 14,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 10,
+    fontWeight: 600,
+    background: 'rgba(139, 92, 246, 0.12)',
+    border: '1px solid rgba(139, 92, 246, 0.35)',
+    color: '#a78bfa',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    boxShadow: '0 4px 16px rgba(139, 92, 246, 0.15)',
   },
 };

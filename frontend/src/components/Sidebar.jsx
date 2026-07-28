@@ -41,6 +41,14 @@ export default function Sidebar({
 }) {
   const navigate = useNavigate();
   const [deletingId, setDeletingId] = useState(null);
+  const [callBtnHover, setCallBtnHover] = useState(false);
+
+  // Safe user values — guard against undefined/null user prop
+  const safeUser = user || {};
+  const userPhoto = safeUser.photoURL || null;
+  const userName = safeUser.displayName || '';
+  const userEmail = safeUser.email || '';
+  const userInitial = (userName || userEmail || '?')[0].toUpperCase();
 
   const handleLogout = async () => {
     await logout();
@@ -70,12 +78,19 @@ export default function Sidebar({
     return tb.localeCompare(ta);
   });
 
+  // Determine the current list zone so AnimatePresence can key transitions
+  const listZone = loading ? 'loading' : allItems.length === 0 ? 'empty' : 'list';
+
   return (
     <aside style={styles.sidebar}>
       {/* Header */}
       <div style={styles.header}>
         <div style={styles.logo}>
-          <div style={styles.logoIcon}>✦</div>
+          <img
+            src="/Gemini_Generated_Image_dsk7okdsk7okdsk7.png"
+            alt="VoiceAI logo"
+            style={styles.logoIcon}
+          />
           <span className="gradient-text" style={styles.logoText}>VoiceAI</span>
         </div>
 
@@ -86,7 +101,15 @@ export default function Sidebar({
         </button>
 
         {/* New Call button */}
-        <button style={styles.newCallBtn} onClick={onNewCall}>
+        <button
+          style={{
+            ...styles.newCallBtn,
+            ...(callBtnHover ? styles.newCallBtnHover : {}),
+          }}
+          onClick={onNewCall}
+          onMouseEnter={() => setCallBtnHover(true)}
+          onMouseLeave={() => setCallBtnHover(false)}
+        >
           <PhoneCall size={15} />
           New Call
         </button>
@@ -96,9 +119,11 @@ export default function Sidebar({
       <div style={styles.listWrap}>
         <p style={styles.sectionLabel}>History</p>
         <div style={styles.list}>
-          <AnimatePresence>
-            {loading ? (
+          {/* Key on listZone so AnimatePresence properly handles switching between states */}
+          <AnimatePresence mode="popLayout" initial={false}>
+            {listZone === 'loading' && (
               <motion.div
+                key="loading"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -107,70 +132,75 @@ export default function Sidebar({
                 <Loader2 size={24} style={{ animation: 'spin 1s linear infinite' }} />
                 <span>Loading...</span>
               </motion.div>
-            ) : allItems.length === 0 ? (
+            )}
+
+            {listZone === 'empty' && (
               <motion.p
+                key="empty"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 style={styles.emptyMsg}
               >
                 No history yet.
                 <br />Start chatting or call!
               </motion.p>
-            ) : (
-              allItems.map((item) => {
-                const isCall = item._type === 'call';
-                const isActive = activeId === item.id;
-                const isDeleting = deletingId === item.id;
-                return (
-                  <motion.div
-                    key={item.id}
-                    initial={{ opacity: 0, x: -8 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -8 }}
-                    className="conv-item"
-                    style={{
-                      ...styles.convItem,
-                      ...(isActive ? styles.convItemActive : {}),
-                      ...(isCall ? styles.convItemCall : {}),
-                      ...(isActive && isCall ? styles.convItemCallActive : {}),
-                    }}
-                    onClick={() => onSelect(item.id, isCall)}
-                  >
-                    {isCall
-                      ? <Phone size={13} style={{ flexShrink: 0, opacity: 0.75, color: '#a78bfa' }} />
-                      : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.6 }} />
-                    }
-
-                    <div style={styles.itemInfo}>
-                      <span style={styles.convTitle}>
-                        {item.title || (isCall ? 'Voice Call' : 'New Chat')}
-                      </span>
-                      <span style={styles.timestamp}>
-                        {formatTimestamp(item.updated_at || item.created_at)}
-                      </span>
-                    </div>
-
-                    {/* Delete button — always visible while deleting */}
-                    <button
-                      className="conv-delete-btn"
-                      style={{
-                        ...styles.deleteBtn,
-                        ...(isDeleting ? styles.deleteBtnVisible : {}),
-                      }}
-                      onClick={(e) => handleDelete(e, item.id, isCall)}
-                      title="Delete"
-                      disabled={isDeleting}
-                    >
-                      {isDeleting ? (
-                        <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                      ) : (
-                        <Trash2 size={12} />
-                      )}
-                    </button>
-                  </motion.div>
-                );
-              })
             )}
+
+            {listZone === 'list' && allItems.map((item) => {
+              const isCall = item._type === 'call';
+              const isActive = activeId === item.id;
+              const isDeleting = deletingId === item.id;
+              return (
+                <motion.div
+                  key={item.id}
+                  layout
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -8 }}
+                  transition={{ duration: 0.18 }}
+                  className="conv-item"
+                  style={{
+                    ...styles.convItem,
+                    ...(isActive ? styles.convItemActive : {}),
+                    ...(isActive && isCall ? styles.convItemCallActive : {}),
+                  }}
+                  onClick={() => onSelect(item.id, isCall)}
+                >
+                  {isCall
+                    ? <Phone size={13} style={{ flexShrink: 0, opacity: 0.75, color: '#a78bfa' }} />
+                    : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.6 }} />
+                  }
+
+                  <div style={styles.itemInfo}>
+                    <span style={styles.convTitle}>
+                      {item.title || (isCall ? 'Voice Call' : 'New Chat')}
+                    </span>
+                    <span style={styles.timestamp}>
+                      {formatTimestamp(item.updated_at || item.created_at)}
+                    </span>
+                  </div>
+
+                  {/* Delete button — visible on hover (CSS) or while deleting */}
+                  <button
+                    className="conv-delete-btn"
+                    style={{
+                      ...styles.deleteBtn,
+                      ...(isDeleting ? styles.deleteBtnVisible : {}),
+                    }}
+                    onClick={(e) => handleDelete(e, item.id, isCall)}
+                    title="Delete"
+                    disabled={isDeleting}
+                  >
+                    {isDeleting ? (
+                      <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                    ) : (
+                      <Trash2 size={12} />
+                    )}
+                  </button>
+                </motion.div>
+              );
+            })}
           </AnimatePresence>
         </div>
       </div>
@@ -178,16 +208,16 @@ export default function Sidebar({
       {/* User footer */}
       <div style={styles.footer}>
         <div style={styles.userInfo}>
-          {user.photoURL ? (
-            <img src={user.photoURL} style={styles.avatar} alt="avatar" />
+          {userPhoto ? (
+            <img src={userPhoto} style={styles.avatar} alt="avatar" />
           ) : (
             <div style={styles.avatarFallback}>
-              {(user.displayName || user.email || '?')[0].toUpperCase()}
+              {userInitial}
             </div>
           )}
           <div style={styles.userText}>
-            <p style={styles.userName}>{user.displayName || 'User'}</p>
-            <p style={styles.userEmail}>{user.email}</p>
+            <p style={styles.userName}>{userName || 'User'}</p>
+            <p style={styles.userEmail}>{userEmail}</p>
           </div>
         </div>
         <button className="btn-icon" onClick={handleLogout} title="Sign out">
@@ -226,12 +256,9 @@ const styles = {
     width: 32,
     height: 32,
     borderRadius: 10,
-    background: 'var(--gradient-brand)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 16,
+    objectFit: 'cover',
     boxShadow: '0 4px 12px var(--accent-glow)',
+    flexShrink: 0,
   },
   logoText: {
     fontSize: '1.2rem',
@@ -258,6 +285,12 @@ const styles = {
     color: '#a78bfa',
     cursor: 'pointer',
     transition: 'all 0.2s',
+  },
+  newCallBtnHover: {
+    background: 'rgba(139,92,246,0.22)',
+    borderColor: 'rgba(139,92,246,0.7)',
+    color: '#c4b5fd',
+    transform: 'translateY(-1px)',
   },
   listWrap: {
     flex: 1,
@@ -311,14 +344,13 @@ const styles = {
     fontSize: '0.845rem',
     minWidth: 0,
     position: 'relative',
+    // Default transparent border prevents layout shift when active border is applied
+    border: '1px solid transparent',
   },
   convItemActive: {
     background: 'var(--bg-glass-strong)',
     color: 'var(--text-primary)',
     border: '1px solid var(--border-accent)',
-  },
-  convItemCall: {
-    // subtle purple tint for call items
   },
   convItemCallActive: {
     border: '1px solid rgba(139,92,246,0.4)',
